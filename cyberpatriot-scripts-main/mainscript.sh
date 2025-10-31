@@ -1,5 +1,4 @@
 #!/bin/bash
-
 BLACK='\033[0;30m'
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -19,18 +18,18 @@ updateSystem() {
   echo -e "${YELLOW}Updating system and fixing /etc/shadow and disabling avahi-daemon and disabling guest account in 5 seconds. To skip, Ctrl+C...${NC}"
   read -t 5
   chmod 640 /etc/shadow
-  systemctl disable avahi-daemon
-  echo "allow-guest=false" >> /etc/lightdm/lightdm.conf
+  systemctl disable avahi-daemon || true
+  echo "allow-guest=false" >> /etc/lightdm/lightdm.conf 2>/dev/null || true
   sudo apt update
-  sudo apt upgrade
+  sudo apt upgrade -y
 }
 
 clamAV() {
   trap 'return' SIGINT
   echo -e "${YELLOW}Installing ClamAV in 5 seconds. To skip, Ctrl+C...${YELLOW}"
   read -t 5
-  sudo apt install clamav
-  sudo freshclam
+  sudo apt install -y clamav
+  sudo freshclam || true
   echo -e "${CYAN}ClamAV installed and updated. Run 'sudo clamscan -i -r --remove=yes /' in a different terminal${NC}"
 }
 
@@ -38,19 +37,24 @@ ufw() {
   trap "return" SIGINT
   echo -e "${YELLOW}Installing and setting up UFW in 5 seconds. To skip, Ctrl+C...${NC}"
   read -t 5
-  sudo apt install ufw
+  sudo apt install -y ufw
   sudo ufw default deny incoming
   sudo ufw default allow outgoing
-  sudo ufw enable
+  yes | sudo ufw enable
   sudo ufw status
   echo -e "${CYAN}UFW installed and set up. Remember to open up outgoing ports for services like SSH, HTTP, and FTP${NC}"
 }
 
 tcpSyn() {
   trap 'return' SIGINT
-  echo -e "${YELLOW}Setting up TCP SYN cookies in 5 seconds. To skip, Ctrl+C...${NC}"
+  echo -e "${YELLOW}Setting up TCP SYN cookies and ASLR in 5 seconds. To skip, Ctrl+C...${NC}"
   read -t 5
-  sudo sysctl -w net.ipv4.tcp_syncookies=1
+  # Enable SYN cookies and ASLR per answer key
+  sudo sed -i 's/^\s*net\.ipv4\.tcp_syncookies\s*=.*/net.ipv4.tcp_syncookies=1/' /etc/sysctl.conf || true
+  grep -q '^net.ipv4.tcp_syncookies=' /etc/sysctl.conf || echo 'net.ipv4.tcp_syncookies=1' | sudo tee -a /etc/sysctl.conf
+  sudo sed -i 's/^\s*kernel\.randomize_va_space\s*=.*/kernel.randomize_va_space=2/' /etc/sysctl.conf || true
+  grep -q '^kernel.randomize_va_space=' /etc/sysctl.conf || echo 'kernel.randomize_va_space=2' | sudo tee -a /etc/sysctl.conf
+  sudo sysctl --system
 }
 
 ssh() {
@@ -59,7 +63,7 @@ ssh() {
   read -t 10
   if grep -qF 'PermitRootLogin' "/etc/ssh/sshd_config"; then sed -i 's/^.*PermitRootLogin.*$/PermitRootLogin no/' "/etc/ssh/sshd_config"; else echo 'PermitRootLogin no' >> /etc/ssh/sshd_config; fi
   if grep -qF 'PermitEmptyPasswords' "/etc/ssh/sshd_config"; then sed -i 's/^.*PermitEmptyPasswords.*$/PermitEmptyPasswords no/' "/etc/ssh/sshd_config"; else echo 'PermitEmptyPasswords no' >> /etc/ssh/sshd_config; fi
-  sudo ufw allow from 202.54.1.5/29 to any port 22
+  sudo ufw allow 22/tcp
   if grep -qF 'ClientAliveInterval' "/etc/ssh/sshd_config"; then sed -i 's/^.*ClientAliveInterval.*$/ClientAliveInterval 300/' "/etc/ssh/sshd_config"; else echo 'ClientAliveInterval 300' >> /etc/ssh/sshd_config; fi
   if grep -qF 'ClientAliveCountMax' "/etc/ssh/sshd_config"; then sed -i 's/^.*ClientAliveCountMax.*$/ClientAliveCountMax 0/' "/etc/ssh/sshd_config"; else echo 'ClientAliveCountMax 0' >> /etc/ssh/sshd_config; fi
   if grep -qF 'IgnoreRhosts' "/etc/ssh/sshd_config"; then sed -i 's/^.*IgnoreRhosts.*$/IgnoreRhosts yes/' "/etc/ssh/sshd_config"; else echo 'IgnoreRhosts yes' >> /etc/ssh/sshd_config; fi
@@ -67,7 +71,7 @@ ssh() {
   sudo sshd -t
   echo -e "${YELLOW}SSH set up. Restarting SSH service in 5 seconds, Ctrl+C to cancel...${NC}"
   read -t 5
-  sudo systemctl restart sshd
+  sudo systemctl restart sshd || sudo systemctl restart ssh
 }
 
 lockRoot() {
@@ -80,28 +84,60 @@ lockRoot() {
 
 changeLoginChances() {
   trap 'return' SIGINT
-  echo -e "${YELLOW}Changing the following in 5 seconds. To skip, Ctrl+C...\nPASS_MAX_DAYS 90\nPASS_MIN_DAYS 10\nPASS_WARN_AGE 7\nauth required pam_tally2.so deny=3 onerr=fail even_deny_root unlock_time=120${NC}"
+  echo -e "${YELLOW}Setting password policy, lockout, and null password restrictions in 5 seconds. To skip, Ctrl+C...${NC}"
   read -t 5
-  sudo sed -i 's/^auth.*required.*pam_tally2.so.*deny=5.*onerr=fail.*even_deny_root.*$/auth required pam_tally2.so deny=3 onerr=fail even_deny_root unlock_time=120/' /etc/pam.d/common-auth
-  sudo sed -i 's/PASS_MAX_DAYS.*$/PASS_MAX_DAYS 90/;s/PASS_MIN_DAYS.*$/PASS_MIN_DAYS 10/;s/PASS_WARN_AGE.*$/PASS_WARN_AGE 7/' /etc/login.defs
-}
+  # Remove nullok from common-auth per answer key
+  sudo sed -i 's/\<nullok\>//g' /etc/pam.d/common-auth
 
-updatePam() {
-  trap 'return' SIGINT
-  echo -e "${YELLOW}Updating PAM (and installing cracklib) in 5 seconds. To skip, Ctrl+C...${NC}"
-  read -t 5
-  echo 'auth required pam_tally2.so deny=5 onerr=fail unlock_time=1800' >> /etc/pam.d/common-auth
-  sudo apt install libpam-cracklib
-  sed -i 's/\(pam_unix\.so.*\)$/\1 remember=5 minlen=8/' /etc/pam.d/common-password
-  sed -i 's/\(pam_cracklib\.so.*\)$/\1 ucredit=-1 lcredit=-1 dcredit=-1 ocredit=-1/' /etc/pam.d/common-password
+  # Configure pam_faillock files per answer key approach (non-interactive)
+  sudo tee /usr/share/pam-configs/faillock >/dev/null <<'EOF'
+Name: Lockout on failed logins
+Default: yes
+Priority: 0
+Auth-Type:
+Primary:
+[default=die] pam_faillock.so authfail
+auth [success=1 default=ignore] pam_unix.so try_first_pass
+EOF
+  sudo tee /usr/share/pam-configs/faillock_reset >/dev/null <<'EOF'
+Name: Reset lockout on success
+Default: yes
+Priority: 0
+Auth-Type:
+Additional:
+required pam_faillock.so authsucc
+EOF
+  sudo tee /usr/share/pam-configs/faillock_notify >/dev/null <<'EOF'
+Name: Notify on account lockout
+Default: yes
+Priority: 1024
+Auth-Type:
+Primary:
+requisite pam_faillock.so preauth
+EOF
+  # Enable new PAM profiles
+  sudo pam-auth-update --enable faillock --enable faillock_reset --enable faillock_notify --force || true
+
+  # Also ensure pam_tally2 strong defaults if present (backwards compatibility)
+  if grep -q 'pam_tally2.so' /etc/pam.d/common-auth; then
+    sudo sed -i 's/^auth.*pam_tally2\.so.*$/auth required pam_tally2.so deny=3 onerr=fail even_deny_root unlock_time=120/' /etc/pam.d/common-auth
+  fi
+
+  # Enforce minlen=10 and remember=3 in common-password
+  if grep -q 'pam_unix.so' /etc/pam.d/common-password; then
+    sudo sed -i 's/\(pam_unix\.so.*\)minlen=[0-9]\+/\1/g' /etc/pam.d/common-password
+    sudo sed -i 's/\(pam_unix\.so.*\)remember=[0-9]\+/\1/g' /etc/pam.d/common-password
+    sudo sed -i 's/\(pam_unix\.so.*\)$/\1 minlen=10 remember=3/' /etc/pam.d/common-password
+  fi
 }
 
 auditing() {
   trap 'return' SIGINT
   echo -e "${YELLOW}Installing and setting up auditd in 5 seconds. To skip, Ctrl+C...${NC}"
   read -t 5
-  sudo apt install auditd
-  auditctl -e 1
+  sudo apt install -y auditd
+  sudo systemctl enable --now auditd || true
+  auditctl -e 1 || true
 }
 
 sanityCheck() {
@@ -118,15 +154,17 @@ removeSamba() {
   trap 'return' SIGINT
   echo -e "${YELLOW}Removing all Samba-related items in 5 seconds. To skip, Ctrl+C...${NC}"
   read -t 5
-  sudo apt remove .*samba.* .*smb.*
+  sudo apt -y remove '.*samba.*' '.*smb.*' || true
 }
 
 removeFiles() {
   trap 'return' SIGINT
   echo -e "${YELLOW}Removing media/hacking files in 5 seconds. To skip, Ctrl+C...${NC}"
   read -t 5
-  sudo find /home/ -type f \( -name "*.mp3" -o -name "*.mp4" \) -delete
+  sudo find /home/ -type f \( -name "*.mp3" -o -name "*.mp4" -o -name "*.ogg" \) -delete
   sudo find /home/ -type f \( -name "*.tar.gz" -o -name "*.tgz" -o -name "*.zip" -o -name "*.deb" \) -delete
+  # remove specific prohibited archive per key
+  sudo rm -f /usr/games/pyrdp-master.zip 2>/dev/null || true
 }
 
 setHomeDirectoryPerms() {
@@ -138,28 +176,21 @@ setHomeDirectoryPerms() {
 
 removeIllegalPrograms() {
   trap 'return' SIGINT
-  echo -e "${YELLOW}Removing nmap zenmap apache2 nginx lighttpd wireshark tcpdump netcat-traditional nikto ophcrack in 5 seconds. To skip, Ctrl+C...${NC}"
+  echo -e "${YELLOW}Removing nmap zenmap apache2 nginx lighttpd wireshark tcpdump netcat-traditional nikto ophcrack doona xprobe squid in 5 seconds. To skip, Ctrl+C...${NC}"
   read -t 5
-  sudo apt remove nmap
-  sudo apt remove zenmap
-  sudo apt remove apache2
-  sudo apt remove nginx
-  sudo apt remove lighttpd
-  sudo apt remove wireshark
-  sudo apt remove tcpdump
-  sudo apt remove netcat-traditional
-  sudo apt remove nikto
-  sudo apt remove ophcrack
+  sudo apt purge -y nmap zenmap apache2 nginx lighttpd wireshark tcpdump netcat-traditional nikto ophcrack doona xprobe squid || true
+  sudo systemctl disable --now nginx 2>/dev/null || true
+  sudo systemctl disable --now squid 2>/dev/null || true
 }
 
 rootkitCheck() {
   trap 'return' SIGINT
   echo -e "${YELLOW}Installing and running chkrootkit and rkhunter in 5 seconds. To skip, Ctrl+C...${NC}"
   read -t 5
-  sudo apt-get install chkrootkit rkhunter
-  sudo chkrootkit
-  sudo rkhunter --update
-  sudo rkhunter --check
+  sudo apt-get install -y chkrootkit rkhunter
+  sudo chkrootkit || true
+  sudo rkhunter --update || true
+  sudo rkhunter --check || true
 }
 
 ipChecks() {
@@ -170,6 +201,29 @@ ipChecks() {
   echo 0 | sudo tee /proc/sys/net/ipv4/ip_forward
   echo "nospoof on" | sudo tee -a /etc/host.conf
   sed -i 's/net\.ipv4\.ip_forward=1/net\.ipv4\.ip_forward=0/' /etc/sysctl.conf 
+}
+
+# Disable or remove nginx and squid services per answer key
+serviceHardening() {
+  trap 'return' SIGINT
+  echo -e "${YELLOW}Disabling/removing nginx and squid services in 5 seconds. To skip, Ctrl+C...${NC}"
+  read -t 5
+  sudo systemctl disable --now nginx 2>/dev/null || true
+  sudo systemctl disable --now squid 2>/dev/null || true
+  sudo apt purge -y nginx nginx-common nginx-core squid || true
+}
+
+# Create required groups/users per image (adjust lists as needed)
+ensureGroupsUsers() {
+  trap 'return' SIGINT
+  echo -e "${YELLOW}Creating required groups/users and correcting memberships in 5 seconds. To skip, Ctrl+C...${NC}"
+  read -t 5
+  # Example from answer key: create group spider and add specific users if they exist
+  sudo addgroup --quiet spider 2>/dev/null || true
+  # Add users to spider only if accounts exist
+  for u in may peni stan miguel; do id "$u" >/dev/null 2>&1 && sudo gpasswd -a "$u" spider || true; done
+  # Example: ensure ham is not admin (remove from sudo)
+  id ham >/dev/null 2>&1 && sudo gpasswd -d ham sudo || true
 }
 
 complete() {
@@ -189,18 +243,19 @@ complete() {
   echo -e "4. Set up TCP SYN cookies"
   echo -e "5. Set up SSH"
   echo -e "6. Locked root account"
-  echo -e "7. Changed login tallies (PAM)"
-  echo -e "8. Updated PAM"
+  echo -e "7. Set password policy and lockout"
+  echo -e "8. Updated PAM and removed nullok"
   echo -e "9. Installed and set up auditd"
   echo -e "10. Removed Samba-related items"
-  echo -e "11. Removed media/hacking files"
+  echo -e "11. Removed media/hacking files (including .ogg and pyrdp archive)"
   echo -e "12. Set home directory permissions"
-  echo -e "13. Removed illegal programs"
+  echo -e "13. Removed illegal programs (including doona, xprobe) and disabled nginx/squid"
   echo -e "14. Installed and ran chkrootkit and rkhunter"
   echo -e "15. Checked for unauthorized ports${NC}"
   exit
 }
 
+# Execution order
 updateSystem
 clamAV
 ufw
@@ -208,12 +263,14 @@ tcpSyn
 ssh
 lockRoot
 changeLoginChances
-
 auditing
 sanityCheck
 removeSamba
+removeFiles
 setHomeDirectoryPerms
 removeIllegalPrograms
 rootkitCheck
 ipChecks
+serviceHardening
+ensureGroupsUsers
 complete

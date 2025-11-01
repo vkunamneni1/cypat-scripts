@@ -5,15 +5,25 @@ if os.geteuid() != 0:
     print("Please run as root...")
     exit()
 
-print("Setting a min/max/warn password age in /etc/login.defs...")
+print("--- Starting Authentication & Password Policy Hardening ---")
+
+print("\n[+] Configuring /etc/login.defs...")
 try:
     with open("/etc/login.defs", 'r+') as f:
         contents = f.read()
         
         # Set password ages (Ubuntu Key #7, Mint Key #7)
-        contents = re.sub(r"PASS_MIN_DAYS\s+(\d+)", "PASS_MIN_DAYS   2", contents)
-        contents = re.sub(r"PASS_MAX_DAYS\s+(\d+)", "PASS_MAX_DAYS   90", contents)
-        contents = re.sub(r"PASS_WARN_AGE\s+(\d+)", "PASS_WARN_AGE   14", contents)
+        min_age_match = re.search(r"PASS_MIN_DAYS\s+(\d+)", contents)
+        max_age_match = re.search(r"PASS_MAX_DAYS\s+(\d+)", contents)
+        warn_age_match = re.search(r"PASS_WARN_AGE\s+(\d+)", contents)
+
+        if min_age_match: print(f"Current min age: {min_age_match.group(1)}")
+        if max_age_match: print(f"Current max age: {max_age_match.group(1)}")
+        if warn_age_match: print(f"Current warn age: {warn_age_match.group(1)}")
+
+        contents = re.sub(r"PASS_MIN_DAYS\s+(\d+)", "PASS_MIN_DAYS   2", contents) # (Ubuntu Key #7)
+        contents = re.sub(r"PASS_MAX_DAYS\s+(\d+)", "PASS_MAX_DAYS   90", contents) # (Mint Key #7)
+        contents = re.sub(r"PASS_WARN_AGE\s+(\d+)", "PASS_WARN_AGE   14", contents) # (Your script's value)
         print("Set PASS_MIN_DAYS to 2")
         print("Set PASS_MAX_DAYS to 90")
         print("Set PASS_WARN_AGE to 14")
@@ -37,7 +47,8 @@ except FileNotFoundError:
 except Exception as e:
     print(f"Error modifying /etc/login.defs: {e}")
 
-print("\nConfiguring /etc/pam.d/common-password...")
+
+print("\n[+] Configuring /etc/pam.d/common-password...")
 try:
     with open("/etc/pam.d/common-password", 'r+') as f:
         contents = f.read()
@@ -45,14 +56,18 @@ try:
         # Ubuntu Key #8 / Mint Key #11: Add minlen=10 to pam_pwquality
         if re.search(r"pam_pwquality\.so", contents):
             if not re.search(r"minlen=", contents):
+                # Correctly add minlen=10 to the pwquality line
                 contents = re.sub(r"(pam_pwquality\.so.*)", r"\1 minlen=10", contents)
                 print("Added minlen=10 to pam_pwquality.so")
         else:
-            print("pam_pwquality.so not found, skipping minlen.")
+            # If pwquality isn't present, add it (CIS 5.3.2.3)
+            contents += "\npassword requisite pam_pwquality.so retry=3 minlen=10\n"
+            print("Added pam_pwquality.so line with minlen=10")
             
         # Mint Key #12: Add remember=5 to pam_unix
         if re.search(r"pam_unix\.so", contents):
             if not re.search(r"remember=", contents):
+                # Correctly add remember=5 to the unix line
                 contents = re.sub(r"(pam_unix\.so.*)", r"\1 remember=5", contents)
                 print("Added remember=5 to pam_unix.so")
         
@@ -65,9 +80,10 @@ except FileNotFoundError:
 except Exception as e:
     print(f"Error modifying /etc/pam.d/common-password: {e}")
 
-print("\nConfiguring /etc/pam.d/common-auth...")
+
+print("\n[+] Configuring /etc/pam.d/common-auth (removing 'nullok')...")
 try:
-    # Ubuntu Key #10 / Mint Key #14: Remove nullok
+    # Ubuntu Key #10 / Mint Key #14 / Practice Key #10: Remove nullok
     with open("/etc/pam.d/common-auth", 'r+') as f:
         contents = f.read()
         if "nullok" in contents:
@@ -85,8 +101,7 @@ except Exception as e:
     print(f"Error modifying /etc/pam.d/common-auth: {e}")
 
 
-print("\nCreating faillock PAM configs (Ubuntu Key #9 / Mint Key #13)...")
-# This is idempotent, running it multiple times is safe.
+print("\n[+] Creating and enabling faillock PAM configs (Ubuntu Key #9 / Mint Key #13)...")
 try:
     os.makedirs('/usr/share/pam-configs', exist_ok=True)
     
@@ -120,4 +135,4 @@ Auth:
 except Exception as e:
     print(f"Error creating PAM configs or running pam-auth-update: {e}")
 
-print("\nPython auth script finished.")
+print("\n--- Python auth script finished. ---")

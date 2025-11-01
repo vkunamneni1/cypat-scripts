@@ -482,7 +482,7 @@ harden_login_screen() {
             echo "greeter-hide-users=true" >> /etc/lightdm/lightdm.conf
         fi
         sed -i -E "s/^\s*allow-guest\s*=.*/allow-guest=false/" /etc/lightdm/lightdm.conf
-        sed -i -E "s/^\s*greeter-hide-users\s*=.*/greeter-hide-users=true/" /etc/lightdm/lightdm.conf
+        sed -i -E "s/^\s*greeter-hide-users\s*=.*/greeter-hide-users=true/" /etc/lightdm.conf
     fi
 
     # For GDM3 (used by modern Ubuntu)

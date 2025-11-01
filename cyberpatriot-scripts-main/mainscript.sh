@@ -252,16 +252,7 @@ remove_backdoors() {
   rm -rf /usr/share/zod 2>/dev/null || true
 }
 
-# 13) NEW: Install Required Software (from Answer Keys)
-install_required_software() {
-    log "Software: installing required software from answer keys."
-    # (Ubuntu Key #15)
-    apt-get install -y x2goserver 2>/dev/null || true
-    # (Mint Key #2)
-    apt-get install -y tshark 2>/dev/null || true
-}
-
-# 14) NEW: Install & Configure AppArmor (CIS)
+# 13) NEW: Install & Configure AppArmor (CIS)
 harden_apparmor() {
     log "AppArmor: Installing and enabling AppArmor (CIS 1.3.1)."
     apt-get install -y apparmor apparmor-utils 2>/dev/null || true
@@ -269,7 +260,7 @@ harden_apparmor() {
     systemctl --now enable apparmor.service 2>/dev/null || true
 }
 
-# 15) NEW: Configure auditd (CIS)
+# 14) NEW: Configure auditd (CIS)
 configure_auditd() {
     log "Auditd: Installing and configuring auditd rules (CIS 6.2)."
     apt-get install -y auditd audispd-plugins 2>/dev/null || true
@@ -331,7 +322,7 @@ EOF
     augenrules --load 2>/dev/null || true
 }
 
-# 16) NEW: Kernel Module Hardening (CIS & konstruktoid)
+# 15) NEW: Kernel Module Hardening (CIS & konstruktoid)
 kernel_module_hardening() {
     log "Kernel Modules: Disabling unused modules."
     # (CIS 1.1.1)
@@ -349,7 +340,7 @@ kernel_module_hardening() {
     echo "install tipc /bin/true" > /etc/modprobe.d/tipc.conf
 }
 
-# 17) NEW: Systemd Hardening (konstruktoid)
+# 16) NEW: Systemd Hardening (konstruktoid)
 systemd_hardening() {
     log "Systemd: Hardening journald, logind, and system configs."
     
@@ -383,15 +374,6 @@ EOF
     sed -ri 's/^\s*#?\s*DefaultLimitCORE\s*=.*/DefaultLimitCORE=0/' /etc/systemd/user.conf
 }
 
-# 18) NEW: hosts.allow & hosts.deny (konstruktoid)
-hosts_hardening() {
-    log "TCP Wrappers: Setting hosts.allow and hosts.deny."
-    # This is a good default, but in CP, be careful it doesn't block scoring.
-    # Allowing SSH is critical.
-    echo "ALL: ALL" > /etc/hosts.deny
-    echo "sshd: ALL" > /etc/hosts.allow
-}
-
 main() {
   require_root
   
@@ -399,9 +381,6 @@ main() {
   
   # Run updates first to get latest packages
   system_update
-  
-  # Install required software
-  install_required_software
   
   # Remove prohibited items
   remove_prohibited_software
@@ -422,16 +401,16 @@ main() {
   # NEW Functions from CIS/konstruktoid
   kernel_module_hardening
   systemd_hardening
-  hosts_hardening
   harden_apparmor
   configure_auditd
   
   log "--- Script Finished ---"
   warn "This script does NOT run PAM/password hardening."
   warn "Run 'python3 py_authscript.py' to apply auth policies."
+  warn "This script does NOT run interactive user/group management."
+  warn "Run 'python3 py_userscript.py' to manage users based on the README."
   warn "Review output for errors."
   warn "A REBOOT is required to apply kernel (GRUB) and immutable auditd rules."
 }
 
 main "$@"
-

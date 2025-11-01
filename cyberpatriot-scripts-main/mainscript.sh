@@ -1,7 +1,6 @@
 #!/bin/bash
 # CyberPatriot Ubuntu 22 hardening script (Comet Assistant enhanced)
-# Applies answer key mitigations AND advanced CIS/konstruktoid hardening.
-# Focus areas: sudo, permissions, firewall, SSH, sysctl, updates, services, auditd.
+# Applies answer key mitigations AND advanced CIS/konstruktoid/linPEAS-inspired hardening.
 # USER-SPECIFIC changes (add/remove users, groups, admin) are in py_userscript.py
 set -euo pipefail
 IFS=$'\n\t'
@@ -189,32 +188,30 @@ EOF
 # 8) Services: disable insecure services
 services_hardening() {
   log "Services: disable unauthorized services from answer keys."
-  # (Ubuntu Key #17 & Mint Key - Penalty #1)
+  # List from playbook: sshd, smtp, pop3, rpcbind, netbios, postgresql, ipp, bind9
+  # We explicitly keep sshd.
+  
+  # (Playbook: smtp)
+  apt-get purge -y postfix 2>/dev/null || true
+  # (Playbook: pop3/imap)
+  apt-get purge -y dovecot-core 2>/dev/null || true
+  # (Playbook: rpcbind)
+  apt-get purge -y rpcbind 2>/dev/null || true
+  # (Playbook: netbios-ssn)
+  apt-get purge -y samba 2>/dev/null || true
+  # (Playbook: postgresql)
+  apt-get purge -y postgresql 2>/dev/null || true
+  # (Playbook: BIND9 is ALWAYS BAD)
+  apt-get purge -y bind9 2>/dev/null || true
+
+  # (Answer Keys)
   systemctl disable --now vsftpd 2>/dev/null || true
-  # (Ubuntu Key #16 / Mint Key #18 / Practice Key #9)
   systemctl disable --now nginx 2>/dev/null || true
-  # (Mint Key #19)
   systemctl disable --now squid 2>/dev/null || true
-  # (CIS 2.1.2)
   systemctl disable --now avahi-daemon.service avahi-daemon.socket 2>/dev/null || true
 }
 
-# 9) Media cleanup
-media_cleanup() {
-  log "Media: remove prohibited files from answer keys."
-  # (Ubuntu Key #21 / Practice Key #13)
-  if [[ -d /home/linda/Music ]]; then
-    rm -f /home/linda/Music/*.mp3 2>/dev/null || true
-  fi
-  # (Mint Key #22)
-  if [[ -d /home/steve/Music ]]; then
-    find /home/steve/Music -name "*.ogg" -type f -delete 2>/dev/null || true
-  fi
-  # (Mint Key #23)
-  rm -f /usr/games/pyrdp-master.zip 2>/dev/null || true
-}
-
-# 10) Update System
+# 9) Update System
 system_update() {
     log "System Updates: running apt-get update and upgrade."
     apt-get update
@@ -222,7 +219,7 @@ system_update() {
     apt-get full-upgrade -y
 }
 
-# 11) NEW: Remove Prohibited Software (from Answer Keys)
+# 10) Remove Prohibited Software (from Answer Keys)
 remove_prohibited_software() {
   log "Software: removing prohibited software from answer keys."
   # (Ubuntu Key #22)
@@ -239,7 +236,7 @@ remove_prohibited_software() {
   apt-get autoremove -y 2>/dev/null || true
 }
 
-# 12) NEW: Remove Backdoors (from Answer Keys)
+# 11) Remove Backdoors (from Answer Keys)
 remove_backdoors() {
   log "Backdoors: removing known backdoors from answer keys."
   # (Ubuntu Key #23 & Practice Key #23: Netcat backdoor)
@@ -252,7 +249,7 @@ remove_backdoors() {
   rm -rf /usr/share/zod 2>/dev/null || true
 }
 
-# 13) NEW: Install & Configure AppArmor (CIS)
+# 12) Install & Configure AppArmor (CIS)
 harden_apparmor() {
     log "AppArmor: Installing and enabling AppArmor (CIS 1.3.1)."
     apt-get install -y apparmor apparmor-utils 2>/dev/null || true
@@ -260,7 +257,7 @@ harden_apparmor() {
     systemctl --now enable apparmor.service 2>/dev/null || true
 }
 
-# 14) NEW: Configure auditd (CIS)
+# 13) Configure auditd (CIS)
 configure_auditd() {
     log "Auditd: Installing and configuring auditd rules (CIS 6.2)."
     apt-get install -y auditd audispd-plugins 2>/dev/null || true
@@ -322,7 +319,7 @@ EOF
     augenrules --load 2>/dev/null || true
 }
 
-# 15) NEW: Kernel Module Hardening (CIS & konstruktoid)
+# 14) Kernel Module Hardening (CIS & konstruktoid)
 kernel_module_hardening() {
     log "Kernel Modules: Disabling unused modules."
     # (CIS 1.1.1)
@@ -340,7 +337,7 @@ kernel_module_hardening() {
     echo "install tipc /bin/true" > /etc/modprobe.d/tipc.conf
 }
 
-# 16) NEW: Systemd Hardening (konstruktoid)
+# 15) Systemd Hardening (konstruktoid)
 systemd_hardening() {
     log "Systemd: Hardening journald, logind, and system configs."
     
@@ -374,6 +371,131 @@ EOF
     sed -ri 's/^\s*#?\s*DefaultLimitCORE\s*=.*/DefaultLimitCORE=0/' /etc/systemd/user.conf
 }
 
+# 16) NEW: Cron Hardening (konstruktoid / Playbook)
+harden_cron() {
+    log "Cron: Restricting 'at' and 'cron' to root."
+    # (CIS 2.4.1)
+    rm -f /etc/cron.deny
+    rm -f /etc/at.deny
+    echo "root" > /etc/cron.allow
+    echo "root" > /etc/at.allow
+    chmod 640 /etc/cron.allow /etc/at.allow
+    chown root:root /etc/cron.allow /etc/at.allow
+}
+
+# 17) NEW: Disable Ctrl-Alt-Del (konstruktoid / CIS 1.1.3)
+disable_ctrl_alt_del() {
+    log "Systemd: Disabling Ctrl-Alt-Del reboot target."
+    systemctl mask ctrl-alt-del.target
+}
+
+# 18) NEW: Remove Legacy Files (konstruktoid / CIS 7.2.3)
+remove_legacy_files() {
+    log "Legacy: Removing .rhosts, .netrc, and hosts.equiv files."
+    find / -name '.rhosts' -type f -delete 2>/dev/null || true
+    find / -name '.netrc' -type f -delete 2>/dev/null || true
+    rm -f /etc/hosts.equiv 2>/dev/null || true
+}
+
+# 19) NEW: Remove Legacy System Users (konstruktoid)
+remove_system_users() {
+    log "Users: Removing unnecessary old system users."
+    for user in games gnats irc list news sync uucp; do
+        if id "$user" >/dev/null 2>&1; then
+            log "  -> Removing system user: $user"
+            deluser "$user" 2>/dev/null || true
+        fi
+    done
+}
+
+# 20) NEW: Fix SUID/GUID (Inspired by linPEAS / CIS 7.2.14)
+fix_suid_guid() {
+    log "Permissions: Removing SUID/GUID bits from non-essential binaries."
+    
+    # List of known-safe SUIDs. We find everything ELSE and remove the bit.
+    read -r -d '' SAFE_SUID_LIST <<'EOF'
+/usr/bin/sudo
+/usr/bin/su
+/usr/bin/passwd
+/usr/bin/gpasswd
+/usr/bin/chsh
+/usr/bin/chfn
+/usr/bin/newgrp
+/usr/lib/openssh/ssh-keysign
+/usr/lib/dbus-1.0/dbus-daemon-launch-helper
+/usr/lib/policykit-1/polkit-agent-helper-1
+/bin/su
+/bin/passwd
+/bin/mount
+/bin/umount
+/sbin/mount.cifs
+/sbin/mount.nfs
+EOF
+
+    # Find all SUID/SGID files, then grep -v -f to remove the safe ones from the list
+    mapfile -t DANGEROUS_FILES < <( (find / -type f \( -perm -4000 -o -perm -2000 \) -exec ls -l {} \; 2>/dev/null) | awk '{print $NF}' | grep -v -f <(echo "$SAFE_SUID_LIST") )
+    
+    for f in "${DANGEROUS_FILES[@]}"; do
+        if [[ -f "$f" ]]; then
+            warn "  -> Removing SUID/SGID bit from: $f"
+            chmod a-s "$f"
+        fi
+    done
+}
+
+# 21) NEW: Fix World-Writable Files (Inspired by linPEAS / CIS 7.2.12 / Playbook)
+fix_world_writable() {
+    log "Permissions: Removing world-writable permissions from files."
+    # (CIS 7.2.12) We scan key areas plus /etc from your playbook.
+    mapfile -t WW_FILES < <(find /home /var/www /var/log /tmp /etc -type f -perm -0002 2>/dev/null)
+    
+    if [[ ${#WW_FILES[@]} -gt 0 ]]; then
+        for f in "${WW_FILES[@]}"; do
+            warn "  -> Removing world-writable bit from file: $f"
+            chmod o-w "$f"
+        done
+    fi
+
+    log "Permissions: Removing world-writable permissions from directories."
+    # (CIS 7.2.11)
+    mapfile -t WW_DIRS < <(find /home /var/www /etc -type d -perm -0002 2>/dev/null)
+    
+    if [[ ${#WW_DIRS[@]} -gt 0 ]]; then
+        for d in "${WW_DIRS[@]}"; do
+            warn "  -> Removing world-writable bit from directory: $d"
+            chmod o-w "$d"
+        done
+    fi
+}
+
+# 22) NEW: Harden Login Screen (from Playbook)
+harden_login_screen() {
+    log "Login Screen: Disabling guest account and hiding user list."
+
+    # For LightDM (used by Mint and older Ubuntu)
+    if [[ -f /etc/lightdm/lightdm.conf ]]; then
+        backup_file /etc/lightdm/lightdm.conf
+        if ! grep -q "allow-guest=" /etc/lightdm/lightdm.conf; then
+            echo "allow-guest=false" >> /etc/lightdm/lightdm.conf
+        fi
+        if ! grep -q "greeter-hide-users=" /etc/lightdm/lightdm.conf; then
+            echo "greeter-hide-users=true" >> /etc/lightdm/lightdm.conf
+        fi
+        sed -i -E "s/^\s*allow-guest\s*=.*/allow-guest=false/" /etc/lightdm/lightdm.conf
+        sed -i -E "s/^\s*greeter-hide-users\s*=.*/greeter-hide-users=true/" /etc/lightdm/lightdm.conf
+    fi
+
+    # For GDM3 (used by modern Ubuntu)
+    if [[ -f /etc/gdm3/custom.conf ]]; then
+        backup_file /etc/gdm3/custom.conf
+        sed -i -E "s/^\s*#?\s*DisableUserList\s*=.*/DisableUserList=true/" /etc/gdm3/custom.conf
+        if ! grep -q "DisableUserList=true" /etc/gdm3/custom.conf; then
+            echo -e "\n[daemon]\nDisableUserList=true" >> /etc/gdm3/custom.conf
+        fi
+    fi
+}
+
+
 main() {
   require_root
   
@@ -384,7 +506,6 @@ main() {
   
   # Remove prohibited items
   remove_prohibited_software
-  media_cleanup
   remove_backdoors
   
   # Harden services and OS
@@ -404,6 +525,15 @@ main() {
   harden_apparmor
   configure_auditd
   
+  # NEW Functions inspired by new sources
+  harden_cron
+  disable_ctrl_alt_del
+  remove_legacy_files
+  remove_system_users
+  fix_suid_guid
+  fix_world_writable
+  harden_login_screen
+  
   log "--- Script Finished ---"
   warn "This script does NOT run PAM/password hardening."
   warn "Run 'python3 py_authscript.py' to apply auth policies."
@@ -414,3 +544,4 @@ main() {
 }
 
 main "$@"
+

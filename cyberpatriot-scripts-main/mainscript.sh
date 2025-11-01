@@ -77,48 +77,45 @@ permission_fixes() {
   done
 }
 
-# 4) Sysctl networking security
+# 4) Sysctl networking security (Updated to edit /etc/sysctl.conf directly)
 sysctl_hardening() {
-  log "Sysctl: hardening network kernel parameters."
-  
-  cat > /etc/sysctl.d/99-cis-hardening.conf <<'EOF'
-# CIS Benchmark & CyberPatriot Hardening
+  log "Sysctl: hardening network kernel parameters in /etc/sysctl.conf..."
+  local conf_file="/etc/sysctl.conf"
+  backup_file "$conf_file"
 
-# CIS 3.3.1.18 & Ubuntu Key #11 & Mint Key #16: Enable TCP SYN cookies
-net.ipv4.tcp_syncookies = 1
+  # Helper function to set a sysctl value in the main config file
+  set_sysctl() {
+    local key="$1"
+    local value="$2"
+    # Check if the key already exists (commented or not)
+    if grep -q -E "^\s*#?\s*${key}\s*=" "$conf_file"; then
+      # It exists, so find and replace it, and uncomment it
+      sed -ri "s/^\s*#?\s*${key}\s*=.*/${key} = ${value}/" "$conf_file"
+    else
+      # It doesn't exist, so append it
+      echo "${key} = ${value}" >> "$conf_file"
+    fi
+  }
 
-# CIS 3.3.1.1 & Ubuntu Key #12: Disable IPv4 forwarding
-net.ipv4.ip_forward = 0
+  log "  -> Applying network hardening settings..."
+  set_sysctl "net.ipv4.tcp_syncookies" "1"
+  set_sysctl "net.ipv4.ip_forward" "0"
+  set_sysctl "kernel.randomize_va_space" "2"
+  set_sysctl "net.ipv4.conf.all.send_redirects" "0"
+  set_sysctl "net.ipv4.conf.default.send_redirects" "0"
+  set_sysctl "net.ipv4.conf.all.accept_redirects" "0"
+  set_sysctl "net.ipv4.conf.default.accept_redirects" "0"
+  set_sysctl "net.ipv4.conf.all.secure_redirects" "0"
+  set_sysctl "net.ipv4.conf.default.secure_redirects" "0"
+  set_sysctl "net.ipv4.conf.all.log_martians" "1"
+  set_sysctl "net.ipv4.conf.default.log_martians" "1"
+  set_sysctl "net.ipv4.conf.all.rp_filter" "1"
+  set_sysctl "net.ipv4.conf.default.rp_filter" "1"
+  set_sysctl "net.ipv6.conf.all.accept_ra" "0"
+  set_sysctl "net.ipv6.conf.default.accept_ra" "0"
 
-# Mint Key #15 & CIS 1.5.1: Enable Address space layout randomization
-kernel.randomize_va_space = 2
-
-# CIS 3.3.1.4 & 3.3.1.5: Disable packet redirect sending
-net.ipv4.conf.all.send_redirects = 0
-net.ipv4.conf.default.send_redirects = 0
-
-# CIS 3.3.1.8 & 3.3.1.9: Disable ICMP redirects
-net.ipv4.conf.all.accept_redirects = 0
-net.ipv4.conf.default.accept_redirects = 0
-
-# CIS 3.3.1.10: Disable secure ICMP redirects
-net.ipv4.conf.all.secure_redirects = 0
-net.ipv4.conf.default.secure_redirects = 0
-
-# CIS 3.3.1.16 & 3.3.1.17: Log suspicious packets
-net.ipv4.conf.all.log_martians = 1
-net.ipv4.conf.default.log_martians = 1
-
-# CIS 3.3.1.12 & 3.3.1.13: Enable reverse path filtering
-net.ipv4.conf.all.rp_filter = 1
-net.ipv4.conf.default.rp_filter = 1
-
-# CIS 3.3.2.7 & 3.3.2.8: Disable IPv6 router advertisements
-net.ipv6.conf.all.accept_ra = 0
-net.ipv6.conf.default.accept_ra = 0
-EOF
-  
-  sysctl --system >/dev/null 2>&1 || true
+  # Apply the changes from the file immediately
+  sysctl -p "$conf_file" >/dev/null 2>&1 || true
 }
 
 # 5) UFW firewall enable

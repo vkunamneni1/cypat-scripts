@@ -5,46 +5,93 @@ if os.geteuid() != 0:
     print("Please run as root...")
     exit()
 
-print("Setting a min/max/warn password age...")
-with open("/etc/login.defs", 'r+') as e:
-    contents = e.read()
-    min_age = re.search(r"PASS_MIN_DAYS\s+(\d+)", contents).group().split()[1]
-    max_age = re.search(r"PASS_MAX_DAYS\s+(\d+)", contents).group().split()[1]
-    warn_age = re.search(r"PASS_WARN_AGE\s+(\d+)", contents).group().split()[1]
-    print(f"Current min age: {min_age}")
-    print(f"Current max age: {max_age}")
-    print(f"Current warn age: {warn_age}")
-    contents = re.sub(r"PASS_MIN_DAYS\s+(\d+)", f"PASS_MIN_DAYS 7", contents)
-    contents = re.sub(r"PASS_MAX_DAYS\s+(\d+)", f"PASS_MAX_DAYS 90", contents)
-    contents = re.sub(r"PASS_WARN_AGE\s+(\d+)", f"PASS_WARN_AGE 14", contents)
-    print(f"Changed min age to 7")
-    print(f"Changed max age to 90")
-    print(f"Changed min age to 14")
-    print("\nAdding some more changes to login.defs...")
-    contents = re.sub(r"FAILLOG_ENAB\s+(yes|no)", f"FAILLOG_ENAB yes", contents)
-    contents = re.sub(r"LOG_UNKFAIL_ENAB\s+(yes|no)", f"LOG_UNKFAIL_ENAB yes", contents)
-    contents = re.sub(r"SYSLOG_SU_ENAB\s+(yes|no)", f"SYSLOG_SU_ENAB yes", contents)
-    contents = re.sub(r"SYSLOG_SG_ENAB\s+(yes|no)", f"SYSLOG_SG_ENAB yes", contents)
-    print(contents)
-    e.seek(0)
-    e.write(contents)
-    e.close()
+print("Setting a min/max/warn password age in /etc/login.defs...")
+try:
+    with open("/etc/login.defs", 'r+') as f:
+        contents = f.read()
+        
+        # Set password ages (Ubuntu Key #7, Mint Key #7)
+        contents = re.sub(r"PASS_MIN_DAYS\s+(\d+)", "PASS_MIN_DAYS   2", contents)
+        contents = re.sub(r"PASS_MAX_DAYS\s+(\d+)", "PASS_MAX_DAYS   90", contents)
+        contents = re.sub(r"PASS_WARN_AGE\s+(\d+)", "PASS_WARN_AGE   14", contents)
+        print("Set PASS_MIN_DAYS to 2")
+        print("Set PASS_MAX_DAYS to 90")
+        print("Set PASS_WARN_AGE to 14")
 
-print("Adding a minimum password length...")
-with open("/etc/pam.d/common-password", 'r+') as e:
-    contents = e.read()
-    contents = re.sub(r"pam.pwquality\.so.*\n", f"pam_pwquality.so retry=3 minlen=10\n", contents)
-    unix = re.search(r'(pam_unix\.so.*)', contents).group(0)
-    contents = re.sub(r"(pam_unix\.so.*\n)", f"{unix} remember=5 minlen=10\n", contents)
-    print("Adding cracklib... Please ensure that cracklib installs correctly.")
-    e.seek(0)
-    e.write(contents)
-    e.close()
+        # Set stronger hashing (CIS 5.4.1.4)
+        contents = re.sub(r"ENCRYPT_METHOD\s+\S+", "ENCRYPT_METHOD SHA512", contents)
+        print("Set ENCRYPT_METHOD to SHA512")
+        
+        # Enable logging (from your original script)
+        contents = re.sub(r"FAILLOG_ENAB\s+(yes|no)", "FAILLOG_ENAB yes", contents)
+        contents = re.sub(r"LOG_UNKFAIL_ENAB\s+(yes|no)", "LOG_UNKFAIL_ENAB yes", contents)
+        contents = re.sub(r"SYSLOG_SU_ENAB\s+(yes|no)", "SYSLOG_SU_ENAB yes", contents)
+        contents = re.sub(r"SYSLOG_SG_ENAB\s+(yes|no)", "SYSLOG_SG_ENAB yes", contents)
+        
+        f.seek(0)
+        f.truncate()
+        f.write(contents)
+        f.close()
+except FileNotFoundError:
+    print("Could not find /etc/login.defs")
+except Exception as e:
+    print(f"Error modifying /etc/login.defs: {e}")
+
+print("\nConfiguring /etc/pam.d/common-password...")
+try:
+    with open("/etc/pam.d/common-password", 'r+') as f:
+        contents = f.read()
+        
+        # Ubuntu Key #8 / Mint Key #11: Add minlen=10 to pam_pwquality
+        if re.search(r"pam_pwquality\.so", contents):
+            if not re.search(r"minlen=", contents):
+                contents = re.sub(r"(pam_pwquality\.so.*)", r"\1 minlen=10", contents)
+                print("Added minlen=10 to pam_pwquality.so")
+        else:
+            print("pam_pwquality.so not found, skipping minlen.")
+            
+        # Mint Key #12: Add remember=5 to pam_unix
+        if re.search(r"pam_unix\.so", contents):
+            if not re.search(r"remember=", contents):
+                contents = re.sub(r"(pam_unix\.so.*)", r"\1 remember=5", contents)
+                print("Added remember=5 to pam_unix.so")
+        
+        f.seek(0)
+        f.truncate()
+        f.write(contents)
+        f.close()
+except FileNotFoundError:
+    print("Could not find /etc/pam.d/common-password")
+except Exception as e:
+    print(f"Error modifying /etc/pam.d/common-password: {e}")
+
+print("\nConfiguring /etc/pam.d/common-auth...")
+try:
+    # Ubuntu Key #10 / Mint Key #14: Remove nullok
+    with open("/etc/pam.d/common-auth", 'r+') as f:
+        contents = f.read()
+        if "nullok" in contents:
+            contents = re.sub(r"\s+nullok", "", contents)
+            print("Removed 'nullok' from common-auth")
+            f.seek(0)
+            f.truncate()
+            f.write(contents)
+        else:
+            print("'nullok' not found, no change needed.")
+        f.close()
+except FileNotFoundError:
+    print("Could not find /etc/pam.d/common-auth")
+except Exception as e:
+    print(f"Error modifying /etc/pam.d/common-auth: {e}")
 
 
-print("Adding a faillock cuz i hate myself...")
-with open('/usr/share/pam-configs/faillock', 'w+') as e:
-    contents = """Name: Enforce failed login attempt counter
+print("\nCreating faillock PAM configs (Ubuntu Key #9 / Mint Key #13)...")
+# This is idempotent, running it multiple times is safe.
+try:
+    os.makedirs('/usr/share/pam-configs', exist_ok=True)
+    
+    with open('/usr/share/pam-configs/faillock', 'w+') as f:
+        contents = """Name: Enforce failed login attempt counter
 Default: no
 Priority: 0
 Auth-Type: Primary
@@ -52,16 +99,25 @@ Auth:
     [default=die] pam_faillock.so authfail
     sufficient pam_faillock.so authsucc
 """
-    e.write(contents)
-    e.close()
+        f.write(contents)
+        f.close()
 
-with open('/usr/share/pam-configs/faillock_notify', 'w+') as e:
-    contents = """Name: Notify on failed login attempts
+    with open('/usr/share/pam-configs/faillock_notify', 'w+') as f:
+        contents = """Name: Notify on failed login attempts
 Default: no
 Priority: 1024
 Auth-Type: Primary
 Auth:
     requisite pam_faillock.so preauth
 """
-    e.write(contents)
-    e.close()
+        f.write(contents)
+        f.close()
+    
+    print("Faillock config files created.")
+    print("Running 'pam-auth-update --enable faillock faillock_notify' to apply...")
+    subprocess.run(["pam-auth-update", "--enable", "faillock", "faillock_notify"], check=True)
+    
+except Exception as e:
+    print(f"Error creating PAM configs or running pam-auth-update: {e}")
+
+print("\nPython auth script finished.")

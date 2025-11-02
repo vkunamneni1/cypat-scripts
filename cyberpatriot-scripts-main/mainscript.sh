@@ -1,13 +1,12 @@
 #!/bin/bash
-# CyberPatriot Ubuntu 22 hardening script (Comet Assistant enhanced)
-# Applies answer key mitigations AND advanced CIS/konstruktoid/linPEAS-inspired hardening.
-# USER-SPECIFIC changes (add/remove users, groups, admin) are in py_userscript.py
+# CyberPatriot Ubuntu 22/Mint 21 Hardening Script (v2 - STABLE)
+# This version removes functions known to break scoring engines or cause instability.
+# (Removed harden_apparmor, fix_suid_guid, and dangerous restarts)
 set -euo pipefail
 IFS=$'\n\t'
 
 log() { echo -e "\n[+] $1"; }
 warn() { echo -e "[!] $1"; }
-run() { echo ">$ $*"; eval "$@"; }
 
 require_root() {
   if [[ $(id -u) -ne 0 ]]; then
@@ -24,10 +23,8 @@ backup_file() {
 # 1) Accounts and groups — GENERAL hardening
 accounts_hardening() {
   log "Accounts: locking root and accounts with empty passwords."
-  # Lock root account (Mint Key #10)
   passwd -l root || true
 
-  # Lock accounts with empty passwords (CIS 7.2.2)
   log "Locking accounts with empty passwords..."
   for user in $(awk -F: '($2 == "") { print $1 }' /etc/shadow); do
       log "  -> Locking user: $user"
@@ -39,15 +36,12 @@ accounts_hardening() {
 sudo_hardening() {
   log "Sudo: require pty, set logfile, and remove NOPASSWD."
   backup_file /etc/sudoers
-  # (CIS 5.2.2 & konstruktoid)
   if ! grep -q '^Defaults.*use_pty' /etc/sudoers; then echo 'Defaults    use_pty' >> /etc/sudoers; fi
-  # (CIS 5.2.3 / Ubuntu Key #9)
   if ! grep -q '^Defaults.*logfile=' /etc/sudoers; then echo 'Defaults    logfile="/var/log/sudo.log"' >> /etc/sudoers; fi
-  # (CIS 5.2.7)
+  
   log "Restricting 'su' command to 'sudo' group"
   sed -i -E "s/^[#\s]*auth\s+required\s+pam_wheel.so/auth\t\trequired\t\tpam_wheel.so group=sudo/g" /etc/pam.d/su
 
-  # Remove NOPASSWD from drop-ins
   if [[ -d /etc/sudoers.d ]]; then
     for f in /etc/sudoers.d/*; do
       [[ -f "$f" ]] || continue
@@ -60,7 +54,6 @@ sudo_hardening() {
 # 3) File permissions fixes
 permission_fixes() {
   log "Permissions: fix core system file permissions."
-  # (CIS 7.1 & Ubuntu Key #14)
   chmod 644 /etc/passwd && chown root:root /etc/passwd
   chmod 640 /etc/shadow && chown root:shadow /etc/shadow
   chmod 644 /etc/group && chown root:root /etc/group
@@ -70,14 +63,14 @@ permission_fixes() {
   chmod 640 /etc/shadow- && chown root:shadow /etc/shadow-
   chmod 640 /etc/gshadow- && chown root:shadow /etc/gshadow-
   
-  # Home directories 750 (CIS 7.2.9)
+  log "Permissions: Setting home directories to 750."
   for d in /home/*; do
     [[ -d "$d" ]] || continue
     chmod 750 "$d" || true
   done
 }
 
-# 4) Sysctl networking security (Updated to edit /etc/sysctl.conf directly)
+# 4) Sysctl networking security
 sysctl_hardening() {
   log "Sysctl: hardening network kernel parameters in /etc/sysctl.conf..."
   local conf_file="/etc/sysctl.conf"
@@ -87,12 +80,9 @@ sysctl_hardening() {
   set_sysctl() {
     local key="$1"
     local value="$2"
-    # Check if the key already exists (commented or not)
     if grep -q -E "^\s*#?\s*${key}\s*=" "$conf_file"; then
-      # It exists, so find and replace it, and uncomment it
       sed -ri "s/^\s*#?\s*${key}\s*=.*/${key} = ${value}/" "$conf_file"
     else
-      # It doesn't exist, so append it
       echo "${key} = ${value}" >> "$conf_file"
     fi
   }
@@ -114,7 +104,6 @@ sysctl_hardening() {
   set_sysctl "net.ipv6.conf.all.accept_ra" "0"
   set_sysctl "net.ipv6.conf.default.accept_ra" "0"
 
-  # Apply the changes from the file immediately
   sysctl -p "$conf_file" >/dev/null 2>&1 || true
 }
 
@@ -122,15 +111,10 @@ sysctl_hardening() {
 ufw_enable() {
   log "Firewall: enable UFW with sane defaults and allow SSH."
   if command -v ufw >/dev/null 2>&1; then
-    # (CIS 4.1.3, 4.1.4, 4.1.5)
     ufw --force default deny incoming || true
     ufw --force default allow outgoing || true
     ufw default deny routed || true
-    
-    # Allow critical services (at least SSH)
     ufw allow 22/tcp || true
-    
-    # (CIS 4.1.2 & Ubuntu Key #13 & Practice Key #8)
     yes | ufw enable || true
   else
     warn "UFW not installed; skipping."
@@ -143,23 +127,15 @@ ssh_hardening() {
   local f=/etc/ssh/sshd_config
   backup_file "$f"
   
-  # (CIS 5.1.20 & Ubuntu Key #24 & Practice Key #16)
   grep -q '^\s*PermitRootLogin' "$f" && sed -ri 's/^\s*PermitRootLogin.*/PermitRootLogin no/' "$f" || echo 'PermitRootLogin no' >> "$f"
-  # (CIS 5.1.19)
   grep -q '^\s*PermitEmptyPasswords' "$f" && sed -ri 's/^\s*PermitEmptyPasswords.*/PermitEmptyPasswords no/' "$f" || echo 'PermitEmptyPasswords no' >> "$f"
-  # (CIS 5.1.7)
   grep -q '^\s*ClientAliveInterval' "$f" && sed -ri 's/^\s*ClientAliveInterval.*/ClientAliveInterval 300/' "$f" || echo 'ClientAliveInterval 300' >> "$f"
   grep -q '^\s*ClientAliveCountMax' "$f" && sed -ri 's/^\s*ClientAliveCountMax.*/ClientAliveCountMax 0/' "$f" || echo 'ClientAliveCountMax 0' >> "$f"
-  # (CIS 5.1.14)
   grep -q '^\s*LogLevel' "$f" && sed -ri 's/^\s*LogLevel.*/LogLevel VERBOSE/' "$f" || echo 'LogLevel VERBOSE' >> "$f"
-  # (CIS 5.1.16)
   grep -q '^\s*MaxAuthTries' "$f" && sed -ri 's/^\s*MaxAuthTries.*/MaxAuthTries 4/' "$f" || echo 'MaxAuthTries 4' >> "$f"
-  # (CIS 5.1.18)
   grep -q '^\s*MaxStartups' "$f" && sed -ri 's/^\s*MaxStartups.*/MaxStartups 10:30:60/' "$f" || echo 'MaxStartups 10:30:60' >> "$f"
-  # (CIS 5.1.5)
   grep -q '^\s*Banner' "$f" && sed -ri 's|^\s*Banner.*|Banner /etc/issue.net|' "$f" || echo 'Banner /etc/issue.net' >> "$f"
   
-  # (CIS 1.6.3 / Ubuntu Key #24)
   echo "Authorized use only. All activity may be monitored." > /etc/issue.net
   chmod 644 /etc/issue.net
   
@@ -168,9 +144,8 @@ ssh_hardening() {
 
 # 7) Updates configuration (auto-check daily)
 updates_daily_check() {
-  log "Updates: configure periodic apt check daily (Ubuntu Key #18, Practice Key #10)."
+  log "Updates: configure periodic apt check daily."
   mkdir -p /etc/apt/apt.conf.d
-  # (Ubuntu Key #18 & Mint Key #20)
   cat > /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
@@ -184,24 +159,20 @@ EOF
 
 # 8) Services: disable insecure services
 services_hardening() {
-  log "Services: disable unauthorized services from answer keys."
-  # List from playbook: sshd, smtp, pop3, rpcbind, netbios, postgresql, ipp, bind9
-  # We explicitly keep sshd.
+  log "Services: Purging unauthorized services."
+  # NOTE: This list is based on your previous scripts.
+  # Add/remove services here based on the README.
   
-  # (Playbook: smtp)
+  # Purge common unwanted services
   apt-get purge -y postfix 2>/dev/null || true
-  # (Playbook: pop3/imap)
   apt-get purge -y dovecot-core 2>/dev/null || true
-  # (Playbook: rpcbind)
   apt-get purge -y rpcbind 2>/dev/null || true
-  # (Playbook: netbios-ssn)
   apt-get purge -y samba 2>/dev/null || true
-  # (Playbook: postgresql)
   apt-get purge -y postgresql 2>/dev/null || true
-  # (Playbook: BIND9 is ALWAYS BAD)
   apt-get purge -y bind9 2>/dev/null || true
-
-  # (Answer Keys)
+  
+  # Disable other common unwanted services
+  # NOTE: vsftpd is often in this list, but remove if it's critical
   systemctl disable --now vsftpd 2>/dev/null || true
   systemctl disable --now nginx 2>/dev/null || true
   systemctl disable --now squid 2>/dev/null || true
@@ -211,55 +182,50 @@ services_hardening() {
 # 9) Update System
 system_update() {
     log "System Updates: running apt-get update and upgrade."
+    
+    # CRITICAL: Install libpam-pwquality *before* running py_authscript.py
+    # This fixes the PAM error.
+    log "Installing required PAM module libpam-pwquality..."
+    apt-get install -y libpam-pwquality 2>/dev/null || true
+    
+    log "Running apt-get update..."
     apt-get update
-    # (Ubuntu Key #19, #20 / Mint Key #21 / Practice Key #11, #12)
+    
+    log "Running apt-get full-upgrade..."
     apt-get full-upgrade -y
 }
 
 # 10) Remove Prohibited Software (from Answer Keys)
 remove_prohibited_software() {
-  log "Software: removing prohibited software from answer keys."
-  # (Ubuntu Key #22)
+  log "Software: removing prohibited software."
   apt-get purge -y aisleriot 2>/dev/null || true
-  # (Mint Key #24)
   apt-get purge -y doona xprobe 2>/dev/null || true
-  # (Practice Key #14, #15)
   apt-get purge -y ophcrack wireshark 2>/dev/null || true
-  # (CIS 2.2.4)
   apt-get purge -y telnet 2>/dev/null || true
-  # (CIS 2.2.2)
   apt-get purge -y rsh-client 2>/dev/null || true
+  
+  # Prevent snap chromium from being auto-installed
+  apt-get purge -y chromium-browser 2>/dev/null || true
   
   apt-get autoremove -y 2>/dev/null || true
 }
 
 # 11) Remove Backdoors (from Answer Keys)
 remove_backdoors() {
-  log "Backdoors: removing known backdoors from answer keys."
-  # (Ubuntu Key #23 & Practice Key #23: Netcat backdoor)
+  log "Backdoors: removing known backdoors."
   pkill -f "nc.traditional -l -p 1337" 2>/dev/null || true
   sed -i '/nc.traditional/d' /etc/crontab 2>/dev/null || true
   rm -f /usr/bin/nc.traditional 2>/dev/null || true
 
-  # (Mint Key #26: Zod backdoor)
   pkill -f "kneelB4zod.py" 2>/dev/null || true
   rm -rf /usr/share/zod 2>/dev/null || true
 }
 
-# 12) Install & Configure AppArmor (CIS)
-harden_apparmor() {
-    log "AppArmor: Installing and enabling AppArmor (CIS 1.3.1)."
-    apt-get install -y apparmor apparmor-utils 2>/dev/null || true
-    systemctl unmask apparmor.service 2>/dev/null || true
-    systemctl --now enable apparmor.service 2>/dev/null || true
-}
-
-# 13) Configure auditd (CIS)
+# 12) Configure auditd (CIS) - **SAFE VERSION**
 configure_auditd() {
-    log "Auditd: Installing and configuring auditd rules (CIS 6.2)."
+    log "Auditd: Installing and configuring auditd rules."
     apt-get install -y auditd audispd-plugins 2>/dev/null || true
     
-    # (CIS 6.2.1.3)
     if grep -qE "^\s*GRUB_CMDLINE_LINUX" /etc/default/grub; then
         if ! grep -q "audit=1" /etc/default/grub; then
             sed -i -E 's/^(GRUB_CMDLINE_LINUX=".*)"/\1 audit=1"/' /etc/default/grub
@@ -270,14 +236,16 @@ configure_auditd() {
         update-grub 2>/dev/null || true
     fi
     
-    # (CIS 6.2.2)
     backup_file /etc/audit/auditd.conf
     sed -i -E "s/^[#\s]*max_log_file\s*=.*/max_log_file = 100/g" /etc/audit/auditd.conf
     sed -i -E "s/^[#\s]*max_log_file_action\s*=.*/max_log_file_action = keep_logs/g" /etc/audit/auditd.conf
     sed -i -E "s/^[#\s]*space_left_action\s*=.*/space_left_action = syslog/g" /etc/audit/auditd.conf
-    sed -i -E "s/^[#\s]*admin_space_left_action\s*=.*/admin_space_left_action = halt/g" /etc/audit/auditd.conf
     
-    # (CIS 6.2.3)
+    # *** CRITICAL FIX ***
+    # Changed 'halt' to 'syslog' to prevent random shutdowns.
+    log "Setting admin_space_left_action to 'syslog' to prevent shutdowns."
+    sed -i -E "s/^[#\s]*admin_space_left_action\s*=.*/admin_space_left_action = syslog/g" /etc/audit/auditd.conf
+    
     cat > /etc/audit/rules.d/99-cis.rules <<'EOF'
 # CIS Audit Rules
 -w /etc/sudoers -p wa -k scope
@@ -310,22 +278,18 @@ configure_auditd() {
 -a always,exit -F arch=b32 -S init_module,finit_module,delete_module -k kernel_modules
 -e 2
 EOF
-    # (CIS 6.2.1.2)
     systemctl unmask auditd.service 2>/dev/null || true
     systemctl --now enable auditd.service 2>/dev/null || true
     augenrules --load 2>/dev/null || true
 }
 
-# 14) Kernel Module Hardening (CIS & konstruktoid)
+# 13) Kernel Module Hardening (CIS & konstruktoid)
 kernel_module_hardening() {
     log "Kernel Modules: Disabling unused modules."
-    # (CIS 1.1.1)
     echo "install cramfs /bin/true" > /etc/modprobe.d/cramfs.conf
     echo "install hfs /bin/true" > /etc/modprobe.d/hfs.conf
     echo "install hfsplus /bin/true" > /etc/modprobe.d/hfsplus.conf
     echo "install usb-storage /bin/true" > /etc/modprobe.d/usb-storage.conf
-    
-    # (konstruktoid)
     echo "install bluetooth /bin/true" > /etc/modprobe.d/bluetooth.conf
     echo "install floppy /bin/true" > /etc/modprobe.d/floppy.conf
     echo "install dccp /bin/true" > /etc/modprobe.d/dccp.conf
@@ -334,7 +298,7 @@ kernel_module_hardening() {
     echo "install tipc /bin/true" > /etc/modprobe.d/tipc.conf
 }
 
-# 15) Systemd Hardening (konstruktoid)
+# 14) Systemd Hardening (konstruktoid) - **SAFE VERSION**
 systemd_hardening() {
     log "Systemd: Hardening journald, logind, and system configs."
     
@@ -346,7 +310,9 @@ Compress=yes
 ForwardToSyslog=no
 MaxLevelStore=warning
 EOF
-    systemctl restart systemd-journald 2>/dev/null || true
+    # *** CRITICAL FIX ***
+    # Removed 'systemctl restart systemd-journald' to prevent instability.
+    # Settings will apply on next reboot.
 
     backup_file /etc/systemd/logind.conf
     cat > /etc/systemd/logind.conf <<'EOF'
@@ -356,7 +322,9 @@ IdleActionSec=15min
 KillUserProcesses=yes
 RemoveIPC=yes
 EOF
-    systemctl restart systemd-logind 2>/dev/null || true
+    # *** CRITICAL FIX ***
+    # Removed 'systemctl restart systemd-logind' to prevent black screen/logout.
+    # Settings will apply on next reboot.
 
     backup_file /etc/systemd/system.conf
     backup_file /etc/systemd/user.conf
@@ -368,10 +336,9 @@ EOF
     sed -ri 's/^\s*#?\s*DefaultLimitCORE\s*=.*/DefaultLimitCORE=0/' /etc/systemd/user.conf
 }
 
-# 16) NEW: Cron Hardening (konstruktoid / Playbook)
+# 15) Cron Hardening
 harden_cron() {
     log "Cron: Restricting 'at' and 'cron' to root."
-    # (CIS 2.4.1)
     rm -f /etc/cron.deny
     rm -f /etc/at.deny
     echo "root" > /etc/cron.allow
@@ -380,13 +347,13 @@ harden_cron() {
     chown root:root /etc/cron.allow /etc/at.allow
 }
 
-# 17) NEW: Disable Ctrl-Alt-Del (konstruktoid / CIS 1.1.3)
+# 16) Disable Ctrl-Alt-Del
 disable_ctrl_alt_del() {
     log "Systemd: Disabling Ctrl-Alt-Del reboot target."
     systemctl mask ctrl-alt-del.target
 }
 
-# 18) NEW: Remove Legacy Files (konstruktoid / CIS 7.2.3)
+# 17) Remove Legacy Files
 remove_legacy_files() {
     log "Legacy: Removing .rhosts, .netrc, and hosts.equiv files."
     find / -name '.rhosts' -type f -delete 2>/dev/null || true
@@ -394,7 +361,7 @@ remove_legacy_files() {
     rm -f /etc/hosts.equiv 2>/dev/null || true
 }
 
-# 19) NEW: Remove Legacy System Users (konstruktoid)
+# 18) Remove Legacy System Users
 remove_system_users() {
     log "Users: Removing unnecessary old system users."
     for user in games gnats irc list news sync uucp; do
@@ -405,45 +372,9 @@ remove_system_users() {
     done
 }
 
-# 20) NEW: Fix SUID/GUID (Inspired by linPEAS / CIS 7.2.14)
-fix_suid_guid() {
-    log "Permissions: Removing SUID/GUID bits from non-essential binaries."
-    
-    # List of known-safe SUIDs. We find everything ELSE and remove the bit.
-    read -r -d '' SAFE_SUID_LIST <<'EOF'
-/usr/bin/sudo
-/usr/bin/su
-/usr/bin/passwd
-/usr/bin/gpasswd
-/usr/bin/chsh
-/usr/bin/chfn
-/usr/bin/newgrp
-/usr/lib/openssh/ssh-keysign
-/usr/lib/dbus-1.0/dbus-daemon-launch-helper
-/usr/lib/policykit-1/polkit-agent-helper-1
-/bin/su
-/bin/passwd
-/bin/mount
-/bin/umount
-/sbin/mount.cifs
-/sbin/mount.nfs
-EOF
-
-    # Find all SUID/SGID files, then grep -v -f to remove the safe ones from the list
-    mapfile -t DANGEROUS_FILES < <( (find / -type f \( -perm -4000 -o -perm -2000 \) -exec ls -l {} \; 2>/dev/null) | awk '{print $NF}' | grep -v -f <(echo "$SAFE_SUID_LIST") )
-    
-    for f in "${DANGEROUS_FILES[@]}"; do
-        if [[ -f "$f" ]]; then
-            warn "  -> Removing SUID/SGID bit from: $f"
-            chmod a-s "$f"
-        fi
-    done
-}
-
-# 21) NEW: Fix World-Writable Files (Inspired by linPEAS / CIS 7.2.12 / Playbook)
+# 19) Fix World-Writable Files
 fix_world_writable() {
     log "Permissions: Removing world-writable permissions from files."
-    # (CIS 7.2.12) We scan key areas plus /etc from your playbook.
     mapfile -t WW_FILES < <(find /home /var/www /var/log /tmp /etc -type f -perm -0002 2>/dev/null)
     
     if [[ ${#WW_FILES[@]} -gt 0 ]]; then
@@ -454,7 +385,6 @@ fix_world_writable() {
     fi
 
     log "Permissions: Removing world-writable permissions from directories."
-    # (CIS 7.2.11)
     mapfile -t WW_DIRS < <(find /home /var/www /etc -type d -perm -0002 2>/dev/null)
     
     if [[ ${#WW_DIRS[@]} -gt 0 ]]; then
@@ -465,7 +395,7 @@ fix_world_writable() {
     fi
 }
 
-# 22) NEW: Harden Login Screen (from Playbook)
+# 20) Harden Login Screen
 harden_login_screen() {
     log "Login Screen: Disabling guest account and hiding user list."
 
@@ -496,49 +426,46 @@ harden_login_screen() {
 main() {
   require_root
   
-  log "--- Applying Answer Key & CIS Hardening ---"
+  log "--- Applying Answer Key & CIS Hardening (STABLE v2) ---"
   
-  # Run updates first to get latest packages
-  system_update
-  
-  # Remove prohibited items
+  # Remove prohibited items FIRST to prevent snap weirdness
   remove_prohibited_software
   remove_backdoors
+  
+  # Run updates second (this also installs libpam-pwquality)
+  system_update
   
   # Harden services and OS
   services_hardening
   accounts_hardening
   sudo_hardening
   permission_fixes
-  # pam_policy function removed - run py_authscript.py instead
   sysctl_hardening
   ufw_enable
   ssh_hardening
   updates_daily_check
   
-  # NEW Functions from CIS/konstruktoid
+  # Safe hardening functions
   kernel_module_hardening
-  systemd_hardening
-  harden_apparmor
-  configure_auditd
-  
-  # NEW Functions inspired by new sources
+  systemd_hardening # Safe version
+  configure_auditd  # Safe version
   harden_cron
   disable_ctrl_alt_del
   remove_legacy_files
   remove_system_users
-  fix_suid_guid
   fix_world_writable
   harden_login_screen
   
+  # NOTE: harden_apparmor and fix_suid_guid were REMOVED
+  # as they are known to break scoring engines.
+  
   log "--- Script Finished ---"
   warn "This script does NOT run PAM/password hardening."
-  warn "Run 'python3 py_authscript.py' to apply auth policies."
+  warn "Run 'python3 py_authscript_v2.py' to apply auth policies."
   warn "This script does NOT run interactive user/group management."
-  warn "Run 'python3 py_userscript.py' to manage users based on the README."
+  warn "Run 'python3 py_userscript_v2.py' to manage users based on the README."
   warn "Review output for errors."
-  warn "A REBOOT is required to apply kernel (GRUB) and immutable auditd rules."
+  warn "A REBOOT is required to apply kernel (GRUB) and auditd rules."
 }
 
 main "$@"
-

@@ -1,12 +1,27 @@
 #!/bin/bash
-# CyberPatriot Ubuntu 22/Mint 21 Hardening Script (v2 - STABLE)
-# This version removes functions known to break scoring engines or cause instability.
-# (Removed harden_apparmor, fix_suid_guid, and dangerous restarts)
+# CyberPatriot Ubuntu 22/Mint 21 Hardening Script (v4 - MASTER)
+#
+# Merges v3 stable automation with the full CIS Benchmark recommendations.
+# EXCLUDES: Time Sync (2.3) and advanced PAM password rules (5.3.3.x)
+#
+# - Audits run at the end and save reports to ~/Desktop/AUDIT_REPORTS
+# - Scoring-engine-safe: NO AppArmor, NO auto-SUID removal.
+# - Stable: NO random reboots or logouts.
+# - Installs AIDE, debsums, and required PAM modules.
+#
 set -euo pipefail
 IFS=$'\n\t'
 
 log() { echo -e "\n[+] $1"; }
 warn() { echo -e "[!] $1"; }
+
+# Find the primary user's desktop to save reports
+PRIMARY_USER=$(awk -F: '($3 >= 1000) && ($1 != "nobody") {print $1}' /etc/passwd | head -n 1)
+REPORT_DIR="/home/$PRIMARY_USER/Desktop/AUDIT_REPORTS"
+if [[ -z "$PRIMARY_USER" ]]; then
+    warn "Could not find a primary user (UID >= 1000). Audit reports will be saved to /root/AUDIT_REPORTS."
+    REPORT_DIR="/root/AUDIT_REPORTS"
+fi
 
 require_root() {
   if [[ $(id -u) -ne 0 ]]; then
@@ -24,6 +39,9 @@ backup_file() {
 accounts_hardening() {
   log "Accounts: locking root and accounts with empty passwords."
   passwd -l root || true
+  
+  log "Setting root shell to nologin."
+  usermod -s /usr/sbin/nologin root || true
 
   log "Locking accounts with empty passwords..."
   for user in $(awk -F: '($2 == "") { print $1 }' /etc/shadow); do
@@ -76,7 +94,6 @@ sysctl_hardening() {
   local conf_file="/etc/sysctl.conf"
   backup_file "$conf_file"
 
-  # Helper function to set a sysctl value in the main config file
   set_sysctl() {
     local key="$1"
     local value="$2"
@@ -103,6 +120,9 @@ sysctl_hardening() {
   set_sysctl "net.ipv4.conf.default.rp_filter" "1"
   set_sysctl "net.ipv6.conf.all.accept_ra" "0"
   set_sysctl "net.ipv6.conf.default.accept_ra" "0"
+  
+  # NEW: Restrict ptrace (CIS 1.5.2)
+  set_sysctl "kernel.yama.ptrace_scope" "1"
 
   sysctl -p "$conf_file" >/dev/null 2>&1 || true
 }
@@ -134,10 +154,8 @@ ssh_hardening() {
   grep -q '^\s*LogLevel' "$f" && sed -ri 's/^\s*LogLevel.*/LogLevel VERBOSE/' "$f" || echo 'LogLevel VERBOSE' >> "$f"
   grep -q '^\s*MaxAuthTries' "$f" && sed -ri 's/^\s*MaxAuthTries.*/MaxAuthTries 4/' "$f" || echo 'MaxAuthTries 4' >> "$f"
   grep -q '^\s*MaxStartups' "$f" && sed -ri 's/^\s*MaxStartups.*/MaxStartups 10:30:60/' "$f" || echo 'MaxStartups 10:30:60' >> "$f"
+  # Set banner (CIS 1.6.3 / 5.1.5)
   grep -q '^\s*Banner' "$f" && sed -ri 's|^\s*Banner.*|Banner /etc/issue.net|' "$f" || echo 'Banner /etc/issue.net' >> "$f"
-  
-  echo "Authorized use only. All activity may be monitored." > /etc/issue.net
-  chmod 644 /etc/issue.net
   
   systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
 }
@@ -160,33 +178,30 @@ EOF
 # 8) Services: disable insecure services
 services_hardening() {
   log "Services: Purging unauthorized services."
-  # NOTE: This list is based on your previous scripts.
-  # Add/remove services here based on the README.
   
   # Purge common unwanted services
-  apt-get purge -y postfix 2>/dev/null || true
-  apt-get purge -y dovecot-core 2>/dev/null || true
-  apt-get purge -y rpcbind 2>/dev/null || true
-  apt-get purge -y samba 2>/dev/null || true
-  apt-get purge -y postgresql 2>/dev/null || true
-  apt-get purge -y bind9 2>/dev/null || true
+  apt-get purge -y postfix dovecot-core rpcbind samba postgresql bind9 \
+                   autofs isc-dhcp-server dnsmasq slapd nfs-kernel-server \
+                   nis rsync snmpd tftpd-hpa xinetd xserver-common \
+                   2>/dev/null || true
   
   # Disable other common unwanted services
-  # NOTE: vsftpd is often in this list, but remove if it's critical
   systemctl disable --now vsftpd 2>/dev/null || true
   systemctl disable --now nginx 2>/dev/null || true
   systemctl disable --now squid 2>/dev/null || true
   systemctl disable --now avahi-daemon.service avahi-daemon.socket 2>/dev/null || true
+  
+  # Disable apport (CIS 1.5.5)
+  systemctl disable --now apport.service 2>/dev/null || true
 }
 
 # 9) Update System
 system_update() {
     log "System Updates: running apt-get update and upgrade."
     
-    # CRITICAL: Install libpam-pwquality *before* running py_authscript.py
-    # This fixes the PAM error.
-    log "Installing required PAM module libpam-pwquality..."
-    apt-get install -y libpam-pwquality 2>/dev/null || true
+    # Install required security packages from CIS/checklist
+    log "Installing required PAM/Audit modules: libpam-pwquality, libpam-tmpdin, libpam-usb, debsums, aide, aide-common..."
+    apt-get install -y libpam-pwquality libpam-tmpdin libpam-usb debsums aide aide-common 2>/dev/null || true
     
     log "Running apt-get update..."
     apt-get update
@@ -195,22 +210,18 @@ system_update() {
     apt-get full-upgrade -y
 }
 
-# 10) Remove Prohibited Software (from Answer Keys)
+# 10) Remove Prohibited Software
 remove_prohibited_software() {
   log "Software: removing prohibited software."
-  apt-get purge -y aisleriot 2>/dev/null || true
-  apt-get purge -y doona xprobe 2>/dev/null || true
-  apt-get purge -y ophcrack wireshark 2>/dev/null || true
-  apt-get purge -y telnet 2>/dev/null || true
-  apt-get purge -y rsh-client 2>/dev/null || true
-  
-  # Prevent snap chromium from being auto-installed
-  apt-get purge -y chromium-browser 2>/dev/null || true
+  apt-get purge -y aisleriot doona xprobe ophcrack wireshark \
+                   telnet rsh-client chromium-browser \
+                   nis talk ldap-utils ftp prelink \
+                   2>/dev/null || true
   
   apt-get autoremove -y 2>/dev/null || true
 }
 
-# 11) Remove Backdoors (from Answer Keys)
+# 11) Remove Backdoors
 remove_backdoors() {
   log "Backdoors: removing known backdoors."
   pkill -f "nc.traditional -l -p 1337" 2>/dev/null || true
@@ -221,7 +232,7 @@ remove_backdoors() {
   rm -rf /usr/share/zod 2>/dev/null || true
 }
 
-# 12) Configure auditd (CIS) - **SAFE VERSION**
+# 12) Configure auditd (CIS) - SAFE VERSION
 configure_auditd() {
     log "Auditd: Installing and configuring auditd rules."
     apt-get install -y auditd audispd-plugins 2>/dev/null || true
@@ -240,14 +251,11 @@ configure_auditd() {
     sed -i -E "s/^[#\s]*max_log_file\s*=.*/max_log_file = 100/g" /etc/audit/auditd.conf
     sed -i -E "s/^[#\s]*max_log_file_action\s*=.*/max_log_file_action = keep_logs/g" /etc/audit/auditd.conf
     sed -i -E "s/^[#\s]*space_left_action\s*=.*/space_left_action = syslog/g" /etc/audit/auditd.conf
-    
-    # *** CRITICAL FIX ***
-    # Changed 'halt' to 'syslog' to prevent random shutdowns.
     log "Setting admin_space_left_action to 'syslog' to prevent shutdowns."
     sed -i -E "s/^[#\s]*admin_space_left_action\s*=.*/admin_space_left_action = syslog/g" /etc/audit/auditd.conf
     
     cat > /etc/audit/rules.d/99-cis.rules <<'EOF'
-# CIS Audit Rules
+# CIS Audit Rules (v3 Master)
 -w /etc/sudoers -p wa -k scope
 -w /etc/sudoers.d/ -p wa -k scope
 -a always,exit -F arch=b64 -S adjtimex,settimeofday -k time-change
@@ -283,7 +291,7 @@ EOF
     augenrules --load 2>/dev/null || true
 }
 
-# 13) Kernel Module Hardening (CIS & konstruktoid)
+# 13) Kernel Module Hardening
 kernel_module_hardening() {
     log "Kernel Modules: Disabling unused modules."
     echo "install cramfs /bin/true" > /etc/modprobe.d/cramfs.conf
@@ -298,7 +306,7 @@ kernel_module_hardening() {
     echo "install tipc /bin/true" > /etc/modprobe.d/tipc.conf
 }
 
-# 14) Systemd Hardening (konstruktoid) - **SAFE VERSION**
+# 14) Systemd Hardening - SAFE VERSION
 systemd_hardening() {
     log "Systemd: Hardening journald, logind, and system configs."
     
@@ -310,9 +318,6 @@ Compress=yes
 ForwardToSyslog=no
 MaxLevelStore=warning
 EOF
-    # *** CRITICAL FIX ***
-    # Removed 'systemctl restart systemd-journald' to prevent instability.
-    # Settings will apply on next reboot.
 
     backup_file /etc/systemd/logind.conf
     cat > /etc/systemd/logind.conf <<'EOF'
@@ -322,9 +327,6 @@ IdleActionSec=15min
 KillUserProcesses=yes
 RemoveIPC=yes
 EOF
-    # *** CRITICAL FIX ***
-    # Removed 'systemctl restart systemd-logind' to prevent black screen/logout.
-    # Settings will apply on next reboot.
 
     backup_file /etc/systemd/system.conf
     backup_file /etc/systemd/user.conf
@@ -397,42 +399,185 @@ fix_world_writable() {
 
 # 20) Harden Login Screen
 harden_login_screen() {
-    log "Login Screen: Disabling guest account and hiding user list."
+    log "Login Screen: Disabling guest, hiding user list, setting banner, and locking."
+
+    local banner_msg="Authorized users only. All activity may be monitored."
 
     # For LightDM (used by Mint and older Ubuntu)
     if [[ -f /etc/lightdm/lightdm.conf ]]; then
         backup_file /etc/lightdm/lightdm.conf
-        if ! grep -q "allow-guest=" /etc/lightdm/lightdm.conf; then
+        sed -i -E "s/^\s*allow-guest\s*=.*/allow-guest=false/" /etc/lightdm/lightdm.conf
+        sed -i -E "s/^\s*greeter-hide-users\s*=.*/greeter-hide-users=true/" /etc/lightdm.conf
+        
+        if ! grep -q "allow-guest=false" /etc/lightdm/lightdm.conf; then
             echo "allow-guest=false" >> /etc/lightdm/lightdm.conf
         fi
-        if ! grep -q "greeter-hide-users=" /etc/lightdm/lightdm.conf; then
+        if ! grep -q "greeter-hide-users=true" /etc/lightdm/lightdm.conf; then
             echo "greeter-hide-users=true" >> /etc/lightdm/lightdm.conf
         fi
-        sed -i -E "s/^\s*allow-guest\s*=.*/allow-guest=false/" /etc/lightdm/lightdm.conf
-        sed -i -E "s/^\s*greeter-hide-users\s*=.*/greeter-hide-users=true/" /etc/lightdm/lightdm.conf
     fi
 
     # For GDM3 (used by modern Ubuntu)
+    if command -v gsettings >/dev/null 2>&1; then
+        log "  -> Applying GDM settings..."
+        # (CIS 1.7.3) Disable user list
+        gsettings set org.gnome.login-screen disable-user-list true 2>/dev/null || warn "gsettings: Could not set disable-user-list"
+        # (CIS 1.7.2) Set login banner
+        gsettings set org.gnome.login-screen banner-message-enable true 2>/dev/null || warn "gsettings: Could not set banner-message-enable"
+        gsettings set org.gnome.login-screen banner-message-text "$banner_msg" 2>/dev/null || warn "gsettings: Could not set banner-message-text"
+        # (CIS 1.7.4) Set screen lock
+        gsettings set org.gnome.desktop.session idle-delay 900 2>/dev/null || warn "gsettings: Could not set idle-delay"
+        gsettings set org.gnome.desktop.screensaver lock-delay 5 2>/dev/null || warn "gsettings: Could not set lock-delay"
+    else
+        warn "gsettings command not found. Skipping GDM hardening."
+    fi
+    
+    # (CIS 1.7.10) Disable XDMCP
     if [[ -f /etc/gdm3/custom.conf ]]; then
         backup_file /etc/gdm3/custom.conf
-        sed -i -E "s/^\s*#?\s*DisableUserList\s*=.*/DisableUserList=true/" /etc/gdm3/custom.conf
-        if ! grep -q "DisableUserList=true" /etc/gdm3/custom.conf; then
-            echo -e "\n[daemon]\nDisableUserList=true" >> /etc/gdm3/custom.conf
+        if ! grep -q "\[xdmcp\]" /etc/gdm3/custom.conf; then
+            echo -e "\n[xdmcp]\nEnable=false" >> /etc/gdm3/custom.conf
+        else
+            sed -i -E "s/^\s*Enable\s*=.*/Enable=false/" /etc/gdm3/custom.conf
         fi
     fi
 }
 
+# 21) NEW: Harden /etc/securetty (from checklist)
+harden_securetty() {
+    log "Hardening /etc/securetty to only allow root login on tty1."
+    if [[ -f /etc/securetty ]]; then
+        backup_file /etc/securetty
+        echo "tty1" > /etc/securetty
+        chmod 600 /etc/securetty
+        chown root:root /etc/securetty
+    else
+        log "  -> /etc/securetty not found, skipping."
+    fi
+}
+
+# 22) NEW: Harden /etc/hosts.allow and /etc/hosts.deny (from checklist)
+harden_host_access() {
+    log "Hardening host access files (hosts.allow, hosts.deny)."
+    
+    backup_file /etc/hosts.deny
+    echo "ALL: ALL" > /etc/hosts.deny
+    
+    backup_file /etc/hosts.allow
+    echo "sshd: ALL" > /etc/hosts.allow
+    
+    chmod 644 /etc/hosts.allow /etc/hosts.deny
+    chown root:root /etc/hosts.allow /etc/hosts.deny
+}
+
+# 23) NEW: Set Default Umask (CIS 5.4.2.6, 5.4.3.3)
+harden_umask() {
+    log "Setting secure default umask (027)."
+    
+    # For /etc/login.defs (affects useradd)
+    backup_file /etc/login.defs
+    sed -i -E "s/^\s*UMASK\s+.*/UMASK\t\t027/" /etc/login.defs
+    if ! grep -q "UMASK" /etc/login.defs; then
+        echo "UMASK 027" >> /etc/login.defs
+    fi
+    
+    # For /etc/profile (affects login shells)
+    backup_file /etc/profile
+    echo "umask 027" > /etc/profile.d/99-umask.sh
+    chmod 644 /etc/profile.d/99-umask.sh
+    chown root:root /etc/profile.d/99-umask.sh
+}
+
+# 24) NEW: Set Shell TMOUT (CIS 5.4.3.2)
+harden_shell_timeout() {
+    log "Setting global shell timeout (TMOUT=900)."
+    cat > /etc/profile.d/99-timeout.sh <<'EOF'
+# (CIS 5.4.3.2) Auto-logout after 15 minutes of inactivity
+TMOUT=900
+readonly TMOUT
+export TMOUT
+EOF
+    chmod 644 /etc/profile.d/99-timeout.sh
+    chown root:root /etc/profile.d/99-timeout.sh
+}
+
+# 25) NEW: Configure AIDE (CIS 6.3)
+harden_aide() {
+    log "Configuring AIDE file integrity monitor..."
+    if ! command -v aide >/dev/null 2>&1; then
+        warn "AIDE not installed. Skipping."
+        return
+    fi
+    
+    log "  -> Initializing AIDE database (this will take a few minutes)..."
+    aideinit -y -f || true # -f to force, -y for non-interactive
+    
+    log "  -> Installing new AIDE database..."
+    if [[ -f /var/lib/aide/aide.db.new ]]; then
+        mv -f /var/lib/aide/aide.db.new /var/lib/aide/aide.db
+    else
+        warn "AIDE database generation failed. Skipping."
+        return
+    fi
+
+    log "  -> Configuring AIDE to monitor audit tools (CIS 6.3.3)..."
+    echo -e "\n# (CIS 6.3.3) Monitor audit tools\n/sbin/auditctl p+i+n+u+g+s+b+acl+xattrs+sha512\n/sbin/auditd p+i+n+u+g+s+b+acl+xattrs+sha512\n/sbin/ausearch p+i+n+u+g+s+b+acl+xattrs+sha512\n/sbin/aureport p+i+n+u+g+s+b+acl+xattrs+sha512\n/sbin/autrace p+i+n+u+g+s+b+acl+xattrs+sha512\n/sbin/augenrules p+i+n+u+g+s+b+acl+xattrs+sha512\n" >> /etc/aide/aide.conf
+
+    log "  -> Enabling AIDE daily check timer (CIS 6.3.2)..."
+    systemctl enable --now aidecheck.timer 2>/dev/null || true
+}
+
+# 26) NEW: Run System Audits
+run_system_audits() {
+    log "Running system audits... Reports will be saved to $REPORT_DIR"
+    mkdir -p "$REPORT_DIR"
+    chown "$PRIMARY_USER":"$PRIMARY_USER" "$REPORT_DIR" 2>/dev/null || true
+
+    log "  -> Finding world-writable files (CIS 7.1.11)..."
+    (df --local -P | awk {'if (NR!=1) print $6'} | xargs -I '{}' find '{}' -xdev -type f -perm -0002) > "$REPORT_DIR/world_writable_files.txt" 2>/dev/null
+    
+    log "  -> Finding unowned/ungrouped files (CIS 7.1.12)..."
+    (df --local -P | awk {'if (NR!=1) print $6'} | xargs -I '{}' find '{}' -xdev -nouser) > "$REPORT_DIR/unowned_files.txt" 2>/dev/null
+    (df --local -P | awk {'if (NR!=1) print $6'} | xargs -I '{}' find '{}' -xdev -nogroup) > "$REPORT_DIR/ungrouped_files.txt" 2>/dev/null
+
+    log "  -> Finding SUID/SGID files (CIS 7.1.13)..."
+    (df --local -P | awk {'if (NR!=1)print $6'} | xargs -I '{}' find '{}' -xdev -type f -perm -4000) > "$REPORT_DIR/suid_files.txt" 2>/dev/null
+    (df --local -P | awk {'if (NR!=1) print $6'} | xargs -I '{}' find '{}' -xdev -type f -perm -2000) > "$REPORT_DIR/sgid_files.txt" 2>/dev/null
+
+    log "  -> Finding modified config files..."
+    (dpkg-query -W -f='${Conffiles}\n' '*' | awk 'OFS="  "{print $2,$1}' | md5sum -c 2>/dev/null | awk -F': ' '$2 !~ /OK/{print $1}') > "$REPORT_DIR/modified_config_files.txt" 2>/dev/null
+
+    log "  -> Listing manually installed packages..."
+    apt-mark showmanual > "$REPORT_DIR/manually_installed_packages.txt" 2>/dev/null
+
+    log "  -> Checking package integrity with debsums..."
+    debsums -ac > "$REPORT_DIR/package_integrity_report.txt" 2>/dev/null
+
+    log "  -> Listing listening ports (CIS 2.1.22)..."
+    (echo "--- ss (new) ---"; ss -tulpn; echo -e "\n--- netstat (old) ---"; netstat -tulpn) > "$REPORT_DIR/listening_ports.txt" 2>/dev/null
+    
+    log "  -> Saving MOTD/Issue files..."
+    (echo "--- /etc/issue ---"; cat /etc/issue; echo -e "\n--- /etc/issue.net ---"; cat /etc/issue.net; echo -e "\n--- /etc/motd ---"; cat /etc/motd) > "$REPORT_DIR/motd_and_issue_files.txt" 2>/dev/null
+
+    log "  -> Checking root PATH integrity (CIS 5.4.2.5)..."
+    (echo "$PATH" | grep -q "::" && echo "FAIL: Root PATH contains empty directory (::)" || echo "PASS: No empty directory in root PATH") > "$REPORT_DIR/root_path_integrity.txt"
+    (echo "$PATH" | grep -q ":$" && echo "FAIL: Root PATH contains trailing colon (:)" || echo "PASS: No trailing colon in root PATH") >> "$REPORT_DIR/root_path_integrity.txt"
+    (echo "$PATH" | tr ":" "\n" | grep "^\.$" && echo "FAIL: Root PATH contains current directory (.)" || echo "PASS: No current directory in root PATH") >> "$REPORT_DIR/root_path_integrity.txt"
+
+    chown -R "$PRIMARY_USER":"$PRIMARY_USER" "$REPORT_DIR" 2>/dev/null || true
+    log "Audit reports saved to $REPORT_DIR"
+}
 
 main() {
   require_root
   
-  log "--- Applying Answer Key & CIS Hardening (STABLE v2) ---"
+  log "--- Applying Answer Key & CIS Hardening (MASTER v4) ---"
   
   # Remove prohibited items FIRST to prevent snap weirdness
   remove_prohibited_software
   remove_backdoors
   
-  # Run updates second (this also installs libpam-pwquality)
+  # Run updates second (this also installs new PAM/audit/AIDE packages)
   system_update
   
   # Harden services and OS
@@ -447,8 +592,8 @@ main() {
   
   # Safe hardening functions
   kernel_module_hardening
-  systemd_hardening # Safe version
-  configure_auditd  # Safe version
+  systemd_hardening       # Safe version
+  configure_auditd        # Safe version
   harden_cron
   disable_ctrl_alt_del
   remove_legacy_files
@@ -456,14 +601,25 @@ main() {
   fix_world_writable
   harden_login_screen
   
+  # New hardening steps from CIS/checklist
+  harden_banners
+  harden_securetty
+  harden_host_access
+  harden_umask
+  harden_shell_timeout
+  harden_aide
+  
   # NOTE: harden_apparmor and fix_suid_guid were REMOVED
   # as they are known to break scoring engines.
   
+  # Run all audits LAST to report on the final state
+  run_system_audits
+  
   log "--- Script Finished ---"
-  warn "This script does NOT run PAM/password hardening."
-  warn "Run 'python3 py_authscript_v2.py' to apply auth policies."
+  warn "This script does NOT run advanced PAM password rules (complexity, history)."
+  warn "Run 'python3 py_authscript_master.py' to apply base auth policies."
   warn "This script does NOT run interactive user/group management."
-  warn "Run 'python3 py_userscript_v2.py' to manage users based on the README."
+  warn "Run 'python3 py_userscript_master.py' to manage users based on the README."
   warn "Review output for errors."
   warn "A REBOOT is required to apply kernel (GRUB) and auditd rules."
 }

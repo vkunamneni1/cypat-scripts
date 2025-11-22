@@ -602,7 +602,7 @@ main() {
   harden_login_screen
   
   # New hardening steps from CIS/checklist
-  harden_banners
+  # harden_banners
   harden_securetty
   harden_host_access
   harden_umask

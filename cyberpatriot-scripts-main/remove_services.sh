@@ -1,106 +1,90 @@
 #!/bin/bash
-# CyberPatriot Interactive Service Remover
-#
-# This script finds all enabled services and compares them against a
-# master "known good" whitelist. It will then ask you to purge anything
-# that is NOT on the whitelist.
 
 # --- Configuration ---
-# This is the master whitelist you provided.
-# I added 'sshd' because it's critical for remote access and was missing.
-MASTER_WHITELIST=" acpid alsa-utils anacron apparmor apport avahi-daemon bluetooth bootmisc.sh brltty ccsclient checkfs.sh checkroot-bootclean.sh checkroot.sh console-setup console-setup.sh cron cups cups-browsed dbus dns-clean gdm3 grub-common hddtemp hostname.sh hwclock.sh irqbalance kerneloops keyboard-setup keyboard-setup.sh killprocs kmod lightdm lm-sensors mountall-bootclean.sh mountall.sh mountdevsubfs.sh mountkernfs.sh mountnfs-bootclean.sh mountnfs.sh networking network-manager ondemand openbsd-inetd open-vm-tools plymouth plymouth-log pppd-dns procps rc.local resolvconf rsync rsyslog saned sendsigs speech-dispatcher thermald udev ufw umountfs umountnfs.sh umountroot unattended-upgrades urandom uuidd vmware-tools vmware-tools-thinprint whoopsie x11-common sshd ssh "
+WHITELIST_FILE="whitelist_of_services.txt"
 
-set -eo pipefail
-
-# --- Helper Functions ---
-log() { echo -e "\n[+] $1"; }
-warn() { echo -e "[!] $1"; }
+# --- Colors for readability ---
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
 
 # --- Root Check ---
-if [[ $(id -u) -ne 0 ]]; then
-  echo "This script must be run as root (use sudo)." >&2
-  exit 1
+if [[ $EUID -ne 0 ]]; then
+   echo -e "${RED}Error: This script must be run as root.${NC}"
+   exit 1
 fi
 
-# --- Step 1: Get User Purge List ---
-log "The script has a master whitelist of known-good services."
-echo "Are there any services ON THIS WHITELIST you want to remove?"
-echo "Example: If you don't need printing or bluetooth, type: cups cups-browsed bluetooth"
-read -r USER_PURGE_INPUT
-USER_PURGE_LIST=" $USER_PURGE_INPUT "
+# --- Check for Whitelist File ---
+if [[ ! -f "$WHITELIST_FILE" ]]; then
+    echo -e "${RED}Error: Could not find $WHITELIST_FILE.${NC}"
+    echo "Please create this file and paste your service names in it."
+    exit 1
+fi
 
-# --- Step 2: Get Enabled System Services ---
-log "Finding all enabled services on the system..."
-# Get all enabled services, remove .service, strip @ instances, and sort uniquely
-mapfile -t ENABLED_SERVICES < <(systemctl list-unit-files --type=service --state=enabled | awk '{print $1}' | sed 's/\.service$//' | sed 's/@.*$//' | sort -u)
+echo -e "${GREEN}Loading whitelist from $WHITELIST_FILE...${NC}"
 
-# --- Step 3: Iterate and Ask for Removal ---
-declare -a REMOVED_PKGS
+# Load whitelist into an Associative Array for fast lookup
+declare -A WHITELIST_MAP
+while read -r service; do
+    # Skip empty lines or comments
+    [[ -z "$service" || "$service" =~ ^# ]] && continue
+    # Trim whitespace
+    clean_service=$(echo "$service" | tr -d '[:space:]')
+    WHITELIST_MAP["$clean_service"]=1
+done < "$WHITELIST_FILE"
 
-for service in "${ENABLED_SERVICES[@]}"; do
+echo -e "${GREEN}Scanning enabled system services...${NC}"
+echo "----------------------------------------------------"
+
+# Get list of all enabled services
+# We filter for 'enabled' because those start at boot.
+ENABLED_SERVICES=$(systemctl list-unit-files --type=service --state=enabled --no-legend | awk '{print $1}' | sed 's/\.service$//' | sort)
+
+for service in $ENABLED_SERVICES; do
     
-    # Clean service name for comparison
-    service_clean=$(echo "$service" | sed 's/@.*$//')
-    
-    # Check if the service is on the master whitelist
-    if [[ "$MASTER_WHITELIST" == *" $service_clean "* ]]; then
-        # It's on the whitelist. Now check if the user *wants* to remove it.
-        if [[ "$USER_PURGE_LIST" == *" $service_clean "* ]]; {
-            warn "Service '$service' is whitelisted but you asked to remove it."
-            read -p "[?] Confirm removal of '$service'? (y/N): " choice
-            case "$choice" in
-                y|Y)
-                    # User confirmed, find the package and purge
-                    pkg=$(dpkg-query -S "$(systemctl show -p FragmentPath "$service.service" | cut -d= -f2)" | cut -d: -f1)
-                    if [[ -n "$pkg" ]]; then
-                        log "Purging $pkg (for $service)..."
-                        apt-get purge -y "$pkg"
-                        REMOVED_PKGS+=("$pkg")
-                    else
-                        log "Stopping/disabling $service (could not find package)..."
-                        systemctl disable --now "$service.service" 2>/dev/null || true
-                    fi
-                    ;;
-                *)
-                    log "Skipping $service."
-                    ;;
-            esac
-        }
-        else
-            # On whitelist and not in user purge list, so we keep it.
-            log "Keeping whitelisted service: $service"
-        fi
+    # Handle services with @ (like getty@tty1), strip the instance identifier for checking
+    base_service=$(echo "$service" | sed 's/@.*$//')
+
+    # Check if the service exists in our Whitelist Map
+    if [[ ${WHITELIST_MAP[$base_service]} ]]; then
+        # It is whitelisted, do nothing and move on (comment out next line to see them)
+        # echo -e "[OK] $service is whitelisted."
+        continue
     else
-        # --- Not on the master whitelist, HIGHLY suspicious ---
-        warn "Service '$service' is enabled but NOT on the master whitelist."
-        read -p "[?] Remove this unauthorized service? (Y/n): " choice
-        case "$choice" in
-            n|N)
-                log "Skipping $service."
+        # --- FOUND A ROGUE SERVICE ---
+        echo -e "\n${RED}[!] SUSPICIOUS SERVICE FOUND: $service ${NC}"
+        
+        # Try to identify what package owns it to help the user decide
+        service_path=$(systemctl show -p FragmentPath "$service.service" | cut -d= -f2)
+        package_name=$(dpkg -S "$service_path" 2>/dev/null | cut -d: -f1)
+        
+        if [[ -n "$package_name" ]]; then
+            echo -e "    Owned by package: ${YELLOW}$package_name${NC}"
+        else
+            echo -e "    ${YELLOW}No package owner found (might be a standalone script or virus).${NC}"
+        fi
+
+        # --- The Interaction ---
+        read -p "Do you want to REMOVE this service? (y/n): " choice
+        case "$choice" in 
+            y|Y)
+                if [[ -n "$package_name" ]]; then
+                    echo -e "Purging package $package_name..."
+                    apt-get purge -y "$package_name"
+                else
+                    echo -e "Disabling and stopping service manually..."
+                    systemctl disable --now "$service.service"
+                    rm "$service_path" 2>/dev/null
+                fi
+                echo -e "${GREEN}Removed/Disabled $service.${NC}"
                 ;;
             *)
-                # Default is YES. Find package and purge.
-                pkg=$(dpkg-query -S "$(systemctl show -p FragmentPath "$service.service" | cut -d= -f2)" 2>/dev/null | cut -d: -f1)
-                if [[ -n "$pkg" ]]; then
-                    log "Purging $pkg (for $service)..."
-                    apt-get purge -y "$pkg"
-                    REMOVED_PKGS+=("$pkg")
-                else
-                    log "Stopping/disabling $service (could not find package)..."
-                    systemctl disable --now "$service.service" 2>/dev/null || true
-                fi
+                echo -e "${YELLOW}Skipping $service.${NC}"
                 ;;
         esac
     fi
 done
 
-# --- Step 4: Final Cleanup ---
-if [[ ${#REMOVED_PKGS[@]} -gt 0 ]]; then
-    log "Running 'apt autoremove' to clean up dependencies..."
-    apt-get autoremove -y
-    log "Removed ${#REMOVED_PKGS[@]} packages."
-else
-    log "No packages were removed."
-fi
-
-log "Service review complete."
+echo -e "\n----------------------------------------------------"
+echo -e "${GREEN}Scan complete. Run 'apt autoremove' to clean up dependencies if you removed packages.${NC}"

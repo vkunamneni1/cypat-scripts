@@ -1,9 +1,10 @@
 #!/bin/bash
-# CyberPatriot Ubuntu 22/Mint 21 Hardening Script (v5 - MASTER)
+# CyberPatriot Ubuntu 22/Mint 21 Hardening Script (v5.1 - MASTER FIXED)
 #
 # Merges v3 stable automation with the full CIS Benchmark recommendations.
 # EXCLUDES: Time Sync (2.3) and advanced PAM password rules (5.3.3.x)
 # ADDED: Full IPv6 Disabling
+# FIXED: Auditd installation fallback and GDM/Mint compatibility checks.
 #
 # - Audits run at the end and save reports to ~/Desktop/AUDIT_REPORTS
 # - Scoring-engine-safe: NO AppArmor, NO auto-SUID removal.
@@ -245,11 +246,14 @@ remove_backdoors() {
   rm -rf /usr/share/zod 2>/dev/null || true
 }
 
-# 12) Configure auditd (CIS) - SAFE VERSION
+# 12) Configure auditd (CIS) - SAFE VERSION (FIXED FOR UBUNTU)
 configure_auditd() {
     log "Auditd: Installing and configuring auditd rules."
-    apt-get install -y auditd audispd-plugins 2>/dev/null || true
     
+    # FIX: Try installing both, if fails, try just auditd. Some ubuntu ver don't have plugins pkg.
+    apt-get install -y auditd audispd-plugins 2>/dev/null || apt-get install -y auditd 2>/dev/null || true
+    
+    # Update Grub for Audit (Standard across OS)
     if grep -qE "^\s*GRUB_CMDLINE_LINUX" /etc/default/grub; then
         if ! grep -q "audit=1" /etc/default/grub; then
             sed -i -E 's/^(GRUB_CMDLINE_LINUX=".*)"/\1 audit=1"/' /etc/default/grub
@@ -260,12 +264,17 @@ configure_auditd() {
         update-grub 2>/dev/null || true
     fi
     
-    backup_file /etc/audit/auditd.conf
-    sed -i -E "s/^[#\s]*max_log_file\s*=.*/max_log_file = 100/g" /etc/audit/auditd.conf
-    sed -i -E "s/^[#\s]*max_log_file_action\s*=.*/max_log_file_action = keep_logs/g" /etc/audit/auditd.conf
-    sed -i -E "s/^[#\s]*space_left_action\s*=.*/space_left_action = syslog/g" /etc/audit/auditd.conf
-    log "Setting admin_space_left_action to 'syslog' to prevent shutdowns."
-    sed -i -E "s/^[#\s]*admin_space_left_action\s*=.*/admin_space_left_action = syslog/g" /etc/audit/auditd.conf
+    # FIX: Only run sed if the file actually exists (prevents crash if install failed)
+    if [[ -f /etc/audit/auditd.conf ]]; then
+        backup_file /etc/audit/auditd.conf
+        sed -i -E "s/^[#\s]*max_log_file\s*=.*/max_log_file = 100/g" /etc/audit/auditd.conf
+        sed -i -E "s/^[#\s]*max_log_file_action\s*=.*/max_log_file_action = keep_logs/g" /etc/audit/auditd.conf
+        sed -i -E "s/^[#\s]*space_left_action\s*=.*/space_left_action = syslog/g" /etc/audit/auditd.conf
+        log "Setting admin_space_left_action to 'syslog' to prevent shutdowns."
+        sed -i -E "s/^[#\s]*admin_space_left_action\s*=.*/admin_space_left_action = syslog/g" /etc/audit/auditd.conf
+    else
+        warn "Auditd configuration file not found. Install may have failed. Skipping config."
+    fi
     
     cat > /etc/audit/rules.d/99-cis.rules <<'EOF'
 # CIS Audit Rules (v3 Master)
@@ -410,7 +419,7 @@ fix_world_writable() {
     fi
 }
 
-# 20) Harden Login Screen
+# 20) Harden Login Screen (FIXED FOR MINT/GDM)
 harden_login_screen() {
     log "Login Screen: Disabling guest, hiding user list, setting banner, and locking."
 
@@ -420,7 +429,7 @@ harden_login_screen() {
     if [[ -f /etc/lightdm/lightdm.conf ]]; then
         backup_file /etc/lightdm/lightdm.conf
         sed -i -E "s/^\s*allow-guest\s*=.*/allow-guest=false/" /etc/lightdm/lightdm.conf
-        sed -i -E "s/^\s*greeter-hide-users\s*=.*/greeter-hide-users=true/" /etc/lightdm/lightdm.conf
+        sed -i -E "s/^\s*greeter-hide-users\s*=.*/greeter-hide-users=true/" /etc/lightdm.conf
         
         if ! grep -q "allow-guest=false" /etc/lightdm/lightdm.conf; then
             echo "allow-guest=false" >> /etc/lightdm/lightdm.conf
@@ -431,7 +440,9 @@ harden_login_screen() {
     fi
 
     # For GDM3 (used by modern Ubuntu)
-    if command -v gsettings >/dev/null 2>&1; then
+    # FIX: Check if GDM3 is actually installed before running commands
+    # Mint has 'gsettings' but not the 'gdm3' schema.
+    if command -v gsettings >/dev/null 2>&1 && [[ -d /etc/gdm3 ]]; then
         log "   -> Applying GDM settings..."
         # (CIS 1.7.3) Disable user list
         gsettings set org.gnome.login-screen disable-user-list true 2>/dev/null || warn "gsettings: Could not set disable-user-list"
@@ -442,7 +453,9 @@ harden_login_screen() {
         gsettings set org.gnome.desktop.session idle-delay 900 2>/dev/null || warn "gsettings: Could not set idle-delay"
         gsettings set org.gnome.desktop.screensaver lock-delay 5 2>/dev/null || warn "gsettings: Could not set lock-delay"
     else
-        warn "gsettings command not found. Skipping GDM hardening."
+        if [[ ! -f /etc/lightdm/lightdm.conf ]]; then
+             warn "Neither LightDM nor GDM3 found. Skipping login hardening."
+        fi
     fi
     
     # (CIS 1.7.10) Disable XDMCP
@@ -584,7 +597,7 @@ run_system_audits() {
 main() {
   require_root
    
-  log "--- Applying Answer Key & CIS Hardening (MASTER v5) ---"
+  log "--- Applying Answer Key & CIS Hardening (MASTER v5.1) ---"
    
   # Remove prohibited items FIRST to prevent snap weirdness
   remove_prohibited_software

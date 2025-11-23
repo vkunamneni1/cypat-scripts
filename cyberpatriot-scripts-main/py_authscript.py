@@ -126,13 +126,13 @@ if "Mint" in OS_NAME:
             contents = f.read()
             if re.search(r"pam_unix\.so", contents):
                 if not re.search(r"remember=", contents):
-                    contents = re.sub(r"(pam_unix\.so.*)", r"\1 remember=3", contents)
-                    print("Added remember=3 to pam_unix.so (Mint Policy)")
+                    contents = re.sub(r"(pam_unix\.so.*)", r"\1 remember=3 minlen=10", contents)
+                    print("Added remember=3 and minlen=10 to pam_unix.so (Mint Policy)")
                     f.seek(0)
                     f.truncate()
                     f.write(contents)
     except Exception as e:
-        print(f"Error setting remember=3: {e}")
+        print(f"Error setting remember=3 and/or minlen=10: {e}")
 
     # Create Mint-specific faillock configs (Item #13)
     try:

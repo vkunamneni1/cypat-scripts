@@ -1,8 +1,9 @@
 #!/bin/bash
-# CyberPatriot Ubuntu 22/Mint 21 Hardening Script (v4 - MASTER)
+# CyberPatriot Ubuntu 22/Mint 21 Hardening Script (v5 - MASTER)
 #
 # Merges v3 stable automation with the full CIS Benchmark recommendations.
 # EXCLUDES: Time Sync (2.3) and advanced PAM password rules (5.3.3.x)
+# ADDED: Full IPv6 Disabling
 #
 # - Audits run at the end and save reports to ~/Desktop/AUDIT_REPORTS
 # - Scoring-engine-safe: NO AppArmor, NO auto-SUID removal.
@@ -39,13 +40,13 @@ backup_file() {
 accounts_hardening() {
   log "Accounts: locking root and accounts with empty passwords."
   passwd -l root || true
-  
+   
   log "Setting root shell to nologin."
   usermod -s /usr/sbin/nologin root || true
 
   log "Locking accounts with empty passwords..."
   for user in $(awk -F: '($2 == "") { print $1 }' /etc/shadow); do
-      log "  -> Locking user: $user"
+      log "   -> Locking user: $user"
       passwd -l "$user"
   done
 }
@@ -56,7 +57,7 @@ sudo_hardening() {
   backup_file /etc/sudoers
   if ! grep -q '^Defaults.*use_pty' /etc/sudoers; then echo 'Defaults    use_pty' >> /etc/sudoers; fi
   if ! grep -q '^Defaults.*logfile=' /etc/sudoers; then echo 'Defaults    logfile="/var/log/sudo.log"' >> /etc/sudoers; fi
-  
+   
   log "Restricting 'su' command to 'sudo' group"
   sed -i -E "s/^[#\s]*auth\s+required\s+pam_wheel.so/auth\t\trequired\t\tpam_wheel.so group=sudo/g" /etc/pam.d/su
 
@@ -80,7 +81,7 @@ permission_fixes() {
   chmod 644 /etc/group- && chown root:root /etc/group-
   chmod 640 /etc/shadow- && chown root:shadow /etc/shadow-
   chmod 640 /etc/gshadow- && chown root:shadow /etc/gshadow-
-  
+   
   log "Permissions: Setting home directories to 750."
   for d in /home/*; do
     [[ -d "$d" ]] || continue
@@ -88,7 +89,7 @@ permission_fixes() {
   done
 }
 
-# 4) Sysctl networking security
+# 4) Sysctl networking security (UPDATED TO DISABLE IPv6)
 sysctl_hardening() {
   log "Sysctl: hardening network kernel parameters in /etc/sysctl.conf..."
   local conf_file="/etc/sysctl.conf"
@@ -118,9 +119,16 @@ sysctl_hardening() {
   set_sysctl "net.ipv4.conf.default.log_martians" "1"
   set_sysctl "net.ipv4.conf.all.rp_filter" "1"
   set_sysctl "net.ipv4.conf.default.rp_filter" "1"
+  
+  # --- UPDATED: FULLY DISABLE IPV6 ---
+  log "  -> Fully disabling IPv6..."
+  set_sysctl "net.ipv6.conf.all.disable_ipv6" "1"
+  set_sysctl "net.ipv6.conf.default.disable_ipv6" "1"
+  set_sysctl "net.ipv6.conf.lo.disable_ipv6" "1"
+  
   set_sysctl "net.ipv6.conf.all.accept_ra" "0"
   set_sysctl "net.ipv6.conf.default.accept_ra" "0"
-  
+   
   # NEW: Restrict ptrace (CIS 1.5.2)
   set_sysctl "kernel.yama.ptrace_scope" "1"
 
@@ -131,6 +139,11 @@ sysctl_hardening() {
 ufw_enable() {
   log "Firewall: enable UFW with sane defaults and allow SSH."
   if command -v ufw >/dev/null 2>&1; then
+    # Ensure UFW ignores IPv6 since we disabled it
+    if [[ -f /etc/default/ufw ]]; then
+        sed -i 's/IPV6=yes/IPV6=no/' /etc/default/ufw
+    fi
+    
     ufw --force default deny incoming || true
     ufw --force default allow outgoing || true
     ufw default deny routed || true
@@ -146,7 +159,7 @@ ssh_hardening() {
   log "SSH: disable root login and tighten settings."
   local f=/etc/ssh/sshd_config
   backup_file "$f"
-  
+   
   grep -q '^\s*PermitRootLogin' "$f" && sed -ri 's/^\s*PermitRootLogin.*/PermitRootLogin no/' "$f" || echo 'PermitRootLogin no' >> "$f"
   grep -q '^\s*PermitEmptyPasswords' "$f" && sed -ri 's/^\s*PermitEmptyPasswords.*/PermitEmptyPasswords no/' "$f" || echo 'PermitEmptyPasswords no' >> "$f"
   grep -q '^\s*ClientAliveInterval' "$f" && sed -ri 's/^\s*ClientAliveInterval.*/ClientAliveInterval 300/' "$f" || echo 'ClientAliveInterval 300' >> "$f"
@@ -156,7 +169,7 @@ ssh_hardening() {
   grep -q '^\s*MaxStartups' "$f" && sed -ri 's/^\s*MaxStartups.*/MaxStartups 10:30:60/' "$f" || echo 'MaxStartups 10:30:60' >> "$f"
   # Set banner (CIS 1.6.3 / 5.1.5)
   grep -q '^\s*Banner' "$f" && sed -ri 's|^\s*Banner.*|Banner /etc/issue.net|' "$f" || echo 'Banner /etc/issue.net' >> "$f"
-  
+   
   systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
 }
 
@@ -178,19 +191,19 @@ EOF
 # 8) Services: disable insecure services
 services_hardening() {
   log "Services: Purging unauthorized services."
-  
+   
   # Purge common unwanted services
   apt-get purge -y postfix dovecot-core rpcbind samba postgresql bind9 \
-                   autofs isc-dhcp-server dnsmasq slapd nfs-kernel-server \
-                   nis rsync snmpd tftpd-hpa xinetd xserver-common \
-                   2>/dev/null || true
-  
+                    autofs isc-dhcp-server dnsmasq slapd nfs-kernel-server \
+                    nis rsync snmpd tftpd-hpa xinetd xserver-common \
+                    2>/dev/null || true
+   
   # Disable other common unwanted services
   systemctl disable --now vsftpd 2>/dev/null || true
   systemctl disable --now nginx 2>/dev/null || true
   systemctl disable --now squid 2>/dev/null || true
   systemctl disable --now avahi-daemon.service avahi-daemon.socket 2>/dev/null || true
-  
+   
   # Disable apport (CIS 1.5.5)
   systemctl disable --now apport.service 2>/dev/null || true
 }
@@ -214,10 +227,10 @@ system_update() {
 remove_prohibited_software() {
   log "Software: removing prohibited software."
   apt-get purge -y aisleriot doona xprobe ophcrack wireshark \
-                   telnet rsh-client chromium-browser \
-                   nis talk ldap-utils ftp prelink \
-                   2>/dev/null || true
-  
+                    telnet rsh-client chromium-browser \
+                    nis talk ldap-utils ftp prelink \
+                    2>/dev/null || true
+   
   apt-get autoremove -y 2>/dev/null || true
 }
 
@@ -368,7 +381,7 @@ remove_system_users() {
     log "Users: Removing unnecessary old system users."
     for user in games gnats irc list news sync uucp; do
         if id "$user" >/dev/null 2>&1; then
-            log "  -> Removing system user: $user"
+            log "   -> Removing system user: $user"
             deluser "$user" 2>/dev/null || true
         fi
     done
@@ -381,7 +394,7 @@ fix_world_writable() {
     
     if [[ ${#WW_FILES[@]} -gt 0 ]]; then
         for f in "${WW_FILES[@]}"; do
-            warn "  -> Removing world-writable bit from file: $f"
+            warn "   -> Removing world-writable bit from file: $f"
             chmod o-w "$f"
         done
     fi
@@ -391,7 +404,7 @@ fix_world_writable() {
     
     if [[ ${#WW_DIRS[@]} -gt 0 ]]; then
         for d in "${WW_DIRS[@]}"; do
-            warn "  -> Removing world-writable bit from directory: $d"
+            warn "   -> Removing world-writable bit from directory: $d"
             chmod o-w "$d"
         done
     fi
@@ -419,7 +432,7 @@ harden_login_screen() {
 
     # For GDM3 (used by modern Ubuntu)
     if command -v gsettings >/dev/null 2>&1; then
-        log "  -> Applying GDM settings..."
+        log "   -> Applying GDM settings..."
         # (CIS 1.7.3) Disable user list
         gsettings set org.gnome.login-screen disable-user-list true 2>/dev/null || warn "gsettings: Could not set disable-user-list"
         # (CIS 1.7.2) Set login banner
@@ -452,7 +465,7 @@ harden_securetty() {
         chmod 600 /etc/securetty
         chown root:root /etc/securetty
     else
-        log "  -> /etc/securetty not found, skipping."
+        log "   -> /etc/securetty not found, skipping."
     fi
 }
 
@@ -509,10 +522,10 @@ harden_aide() {
         return
     fi
     
-    log "  -> Initializing AIDE database (this will take a few minutes)..."
+    log "   -> Initializing AIDE database (this will take a few minutes)..."
     aideinit -y -f || true # -f to force, -y for non-interactive
     
-    log "  -> Installing new AIDE database..."
+    log "   -> Installing new AIDE database..."
     if [[ -f /var/lib/aide/aide.db.new ]]; then
         mv -f /var/lib/aide/aide.db.new /var/lib/aide/aide.db
     else
@@ -520,10 +533,10 @@ harden_aide() {
         return
     fi
 
-    log "  -> Configuring AIDE to monitor audit tools (CIS 6.3.3)..."
+    log "   -> Configuring AIDE to monitor audit tools (CIS 6.3.3)..."
     echo -e "\n# (CIS 6.3.3) Monitor audit tools\n/sbin/auditctl p+i+n+u+g+s+b+acl+xattrs+sha512\n/sbin/auditd p+i+n+u+g+s+b+acl+xattrs+sha512\n/sbin/ausearch p+i+n+u+g+s+b+acl+xattrs+sha512\n/sbin/aureport p+i+n+u+g+s+b+acl+xattrs+sha512\n/sbin/autrace p+i+n+u+g+s+b+acl+xattrs+sha512\n/sbin/augenrules p+i+n+u+g+s+b+acl+xattrs+sha512\n" >> /etc/aide/aide.conf
 
-    log "  -> Enabling AIDE daily check timer (CIS 6.3.2)..."
+    log "   -> Enabling AIDE daily check timer (CIS 6.3.2)..."
     systemctl enable --now aidecheck.timer 2>/dev/null || true
 }
 
@@ -533,33 +546,33 @@ run_system_audits() {
     mkdir -p "$REPORT_DIR"
     chown "$PRIMARY_USER":"$PRIMARY_USER" "$REPORT_DIR" 2>/dev/null || true
 
-    log "  -> Finding world-writable files (CIS 7.1.11)..."
+    log "   -> Finding world-writable files (CIS 7.1.11)..."
     (df --local -P | awk {'if (NR!=1) print $6'} | xargs -I '{}' find '{}' -xdev -type f -perm -0002) > "$REPORT_DIR/world_writable_files.txt" 2>/dev/null
     
-    log "  -> Finding unowned/ungrouped files (CIS 7.1.12)..."
+    log "   -> Finding unowned/ungrouped files (CIS 7.1.12)..."
     (df --local -P | awk {'if (NR!=1) print $6'} | xargs -I '{}' find '{}' -xdev -nouser) > "$REPORT_DIR/unowned_files.txt" 2>/dev/null
     (df --local -P | awk {'if (NR!=1) print $6'} | xargs -I '{}' find '{}' -xdev -nogroup) > "$REPORT_DIR/ungrouped_files.txt" 2>/dev/null
 
-    log "  -> Finding SUID/SGID files (CIS 7.1.13)..."
+    log "   -> Finding SUID/SGID files (CIS 7.1.13)..."
     (df --local -P | awk {'if (NR!=1)print $6'} | xargs -I '{}' find '{}' -xdev -type f -perm -4000) > "$REPORT_DIR/suid_files.txt" 2>/dev/null
     (df --local -P | awk {'if (NR!=1) print $6'} | xargs -I '{}' find '{}' -xdev -type f -perm -2000) > "$REPORT_DIR/sgid_files.txt" 2>/dev/null
 
-    log "  -> Finding modified config files..."
+    log "   -> Finding modified config files..."
     (dpkg-query -W -f='${Conffiles}\n' '*' | awk 'OFS="  "{print $2,$1}' | md5sum -c 2>/dev/null | awk -F': ' '$2 !~ /OK/{print $1}') > "$REPORT_DIR/modified_config_files.txt" 2>/dev/null
 
-    log "  -> Listing manually installed packages..."
+    log "   -> Listing manually installed packages..."
     apt-mark showmanual > "$REPORT_DIR/manually_installed_packages.txt" 2>/dev/null
 
-    log "  -> Checking package integrity with debsums..."
+    log "   -> Checking package integrity with debsums..."
     debsums -ac > "$REPORT_DIR/package_integrity_report.txt" 2>/dev/null
 
-    log "  -> Listing listening ports (CIS 2.1.22)..."
+    log "   -> Listing listening ports (CIS 2.1.22)..."
     (echo "--- ss (new) ---"; ss -tulpn; echo -e "\n--- netstat (old) ---"; netstat -tulpn) > "$REPORT_DIR/listening_ports.txt" 2>/dev/null
     
-    log "  -> Saving MOTD/Issue files..."
+    log "   -> Saving MOTD/Issue files..."
     (echo "--- /etc/issue ---"; cat /etc/issue; echo -e "\n--- /etc/issue.net ---"; cat /etc/issue.net; echo -e "\n--- /etc/motd ---"; cat /etc/motd) > "$REPORT_DIR/motd_and_issue_files.txt" 2>/dev/null
 
-    log "  -> Checking root PATH integrity (CIS 5.4.2.5)..."
+    log "   -> Checking root PATH integrity (CIS 5.4.2.5)..."
     (echo "$PATH" | grep -q "::" && echo "FAIL: Root PATH contains empty directory (::)" || echo "PASS: No empty directory in root PATH") > "$REPORT_DIR/root_path_integrity.txt"
     (echo "$PATH" | grep -q ":$" && echo "FAIL: Root PATH contains trailing colon (:)" || echo "PASS: No trailing colon in root PATH") >> "$REPORT_DIR/root_path_integrity.txt"
     (echo "$PATH" | tr ":" "\n" | grep "^\.$" && echo "FAIL: Root PATH contains current directory (.)" || echo "PASS: No current directory in root PATH") >> "$REPORT_DIR/root_path_integrity.txt"
@@ -570,16 +583,16 @@ run_system_audits() {
 
 main() {
   require_root
-  
-  log "--- Applying Answer Key & CIS Hardening (MASTER v4) ---"
-  
+   
+  log "--- Applying Answer Key & CIS Hardening (MASTER v5) ---"
+   
   # Remove prohibited items FIRST to prevent snap weirdness
   remove_prohibited_software
   remove_backdoors
-  
+   
   # Run updates second (this also installs new PAM/audit/AIDE packages)
   system_update
-  
+   
   # Harden services and OS
   services_hardening
   accounts_hardening
@@ -589,7 +602,7 @@ main() {
   ufw_enable
   ssh_hardening
   updates_daily_check
-  
+   
   # Safe hardening functions
   kernel_module_hardening
   systemd_hardening       # Safe version
@@ -600,7 +613,7 @@ main() {
   remove_system_users
   fix_world_writable
   harden_login_screen
-  
+   
   # New hardening steps from CIS/checklist
   # harden_banners
   harden_securetty
@@ -608,13 +621,13 @@ main() {
   harden_umask
   harden_shell_timeout
   harden_aide
-  
+   
   # NOTE: harden_apparmor and fix_suid_guid were REMOVED
   # as they are known to break scoring engines.
-  
+   
   # Run all audits LAST to report on the final state
   run_system_audits
-  
+   
   log "--- Script Finished ---"
   warn "This script does NOT run advanced PAM password rules (complexity, history)."
   warn "Run 'python3 py_authscript_master.py' to apply base auth policies."

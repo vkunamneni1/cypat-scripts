@@ -1,41 +1,59 @@
 import os, re, subprocess
 
-# Define the target max days to enforce
+# --- Configuration ---
 TARGET_MAX_DAYS = 90
-# Define the target inactive days (CIS 5.4.1.5)
 TARGET_INACTIVE_DAYS = 30
 
-# make sure running as admin
+# --- Helper Functions ---
+def get_os_name():
+    try:
+        with open("/etc/os-release", "r") as f:
+            for line in f:
+                if line.startswith("NAME="):
+                    return line.split("=")[1].strip().strip('"')
+    except:
+        return "Unknown"
+    return "Unknown"
+
+def run_command(command):
+    try:
+        subprocess.run(command, shell=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except subprocess.CalledProcessError:
+        return False
+
+# --- Root Check ---
 if os.geteuid() != 0:
     print("Please run as root...")
     exit()
 
-print("--- Starting Authentication & Password Policy Hardening ---")
+OS_NAME = get_os_name()
+print(f"--- Starting Authentication Hardening for {OS_NAME} ---")
 
+# =============================================================================
+# 1. LOGIN.DEFS (Common to both)
+# =============================================================================
 print("\n[+] Configuring /etc/login.defs...")
 try:
     with open("/etc/login.defs", 'r+') as f:
         contents = f.read()
         
-        # Set password ages (CIS 5.4.1.1, 5.4.1.3)
+        # Set password ages
         contents = re.sub(r"^\s*PASS_MIN_DAYS\s+(\d+)", "PASS_MIN_DAYS   2", contents, flags=re.MULTILINE)
         contents = re.sub(r"^\s*PASS_MAX_DAYS\s+(\d+)", f"PASS_MAX_DAYS   {TARGET_MAX_DAYS}", contents, flags=re.MULTILINE)
         contents = re.sub(r"^\s*PASS_WARN_AGE\s+(\d+)", "PASS_WARN_AGE   14", contents, flags=re.MULTILINE)
         print("Set PASS_MIN_DAYS to 2")
         print(f"Set PASS_MAX_DAYS to {TARGET_MAX_DAYS}")
-        print("Set PASS_WARN_AGE to 14")
         
-        # NEW: Set inactive lock (CIS 5.4.1.5)
+        # Set inactive lock
         if re.search(r"^\s*INACTIVE\s+", contents, re.MULTILINE):
             contents = re.sub(r"^\s*INACTIVE\s+(-?\d+)", f"INACTIVE\t{TARGET_INACTIVE_DAYS}", contents, flags=re.MULTILINE)
         else:
             contents += f"\nINACTIVE\t{TARGET_INACTIVE_DAYS}\n"
         print(f"Set INACTIVE to {TARGET_INACTIVE_DAYS}")
 
-
-        # Set stronger hashing (CIS 5.4.1.4)
+        # Set stronger hashing
         contents = re.sub(r"^\s*ENCRYPT_METHOD\s+\S+", "ENCRYPT_METHOD SHA512", contents, flags=re.MULTILINE)
-        print("Set ENCRYPT_METHOD to SHA512")
         
         # Enable logging
         contents = re.sub(r"^\s*FAILLOG_ENAB\s+(yes|no)", "FAILLOG_ENAB yes", contents, flags=re.MULTILINE)
@@ -46,100 +64,30 @@ try:
         f.seek(0)
         f.truncate()
         f.write(contents)
-        f.close()
-except FileNotFoundError:
-    print("Could not find /etc/login.defs")
 except Exception as e:
     print(f"Error modifying /etc/login.defs: {e}")
 
-# --- Enforce policy on existing users ---
-
-print(f"\n[+] Enforcing PASS_MAX_DAYS ({TARGET_MAX_DAYS}) for all existing human users...")
+# =============================================================================
+# 2. Enforce Policy on Existing Users (Common)
+# =============================================================================
+print(f"\n[+] Enforcing PASS_MAX_DAYS ({TARGET_MAX_DAYS}) for existing users...")
 try:
-    user_list_output = subprocess.check_output(
-        "awk -F: '($3 >= 1000) && ($1 != \"nobody\") { print $1 }' /etc/passwd",
-        shell=True,
-        text=True
-    ).strip()
-    
-    users_to_check = user_list_output.split('\n')
-    
-    for user in users_to_check:
+    user_list = subprocess.check_output("awk -F: '($3 >= 1000) && ($1 != \"nobody\") { print $1 }' /etc/passwd", shell=True, text=True).strip().split('\n')
+    for user in user_list:
         if not user: continue
-        
-        shadow_entry = subprocess.check_output(
-            f"sudo chage -l {user} | grep 'Maximum number of days between password change'",
-            shell=True,
-            text=True
-        ).strip()
-        
-        current_max_days_match = re.search(r":\s*(\d+)", shadow_entry)
-        
-        if current_max_days_match:
-            current_max_days = int(current_max_days_match.group(1))
-            
-            if current_max_days > TARGET_MAX_DAYS:
-                print(f"  -> User '{user}': Found max days = {current_max_days}. Fixing...")
-                subprocess.run(
-                    ["sudo", "chage", "-M", str(TARGET_MAX_DAYS), user], 
-                    check=True,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL
-                )
-                print(f"     SUCCESS: Set max days to {TARGET_MAX_DAYS} for '{user}'.")
-            else:
-                print(f"  -> User '{user}': Max days ({current_max_days}) is compliant. Skipping.")
-        else:
-            print(f"  WARN: Could not parse max days for user '{user}'. Skipping.")
-
-except subprocess.CalledProcessError as e:
-    print(f"ERROR: Failed to run user check command: {e}")
+        subprocess.run(["chage", "-M", str(TARGET_MAX_DAYS), user], check=False)
+    print("Policy enforced on all users.")
 except Exception as e:
-    print(f"ERROR: An unexpected error occurred during user policy enforcement: {e}")
+    print(f"Error checking users: {e}")
 
+# =============================================================================
+# 3. PAM Configuration (OS Specific)
+# =============================================================================
 
-print("\n[+] Configuring /etc/pam.d/common-password...")
+print("\n[+] Configuring PAM...")
+
+# --- Common Task: Remove 'nullok' ---
 try:
-    with open("/etc/pam.d/common-password", 'r+') as f:
-        contents = f.read()
-        
-        # CIS 5.3.3.2.2: Add minlen=10 to pam_pwquality
-        if re.search(r"pam_pwquality\.so", contents):
-            if not re.search(r"minlen=", contents):
-                contents = re.sub(r"(pam_pwquality\.so.*)", r"\1 minlen=10", contents)
-                print("Added minlen=10 to pam_pwquality.so")
-        else:
-            contents += "\npassword requisite pam_pwquality.so retry=3 minlen=10\n"
-            print("Added pam_pwquality.so line with minlen=10")
-            
-        # CIS 5.3.3.4.2: Remove 'remember' from pam_unix (using pwhistory instead)
-        if re.search(r"pam_unix\.so.*remember=", contents):
-            print("Removing 'remember' from pam_unix.so (will use pam_pwhistory).")
-            contents = re.sub(r"\s+remember=\d+", "", contents)
-            
-        # CIS 5.3.2.4: Add pam_pwhistory
-        if not re.search(r"pam_pwhistory\.so", contents):
-            print("Adding pam_pwhistory.so with remember=5.")
-            # Insert pwhistory *before* pam_unix
-            contents = re.sub(
-                r"(password\s+\[success=1 default=ignore\]\s+pam_unix\.so.*)",
-                "password requisite pam_pwhistory.so remember=5\n" + r"\1",
-                contents
-            )
-        
-        f.seek(0)
-        f.truncate()
-        f.write(contents)
-        f.close()
-except FileNotFoundError:
-    print("Could not find /etc/pam.d/common-password")
-except Exception as e:
-    print(f"Error modifying /etc/pam.d/common-password: {e}")
-
-
-print("\n[+] Configuring /etc/pam.d/common-auth (removing 'nullok')...")
-try:
-    # CIS 5.3.3.4.1: Remove nullok
     with open("/etc/pam.d/common-auth", 'r+') as f:
         contents = f.read()
         if "nullok" in contents:
@@ -148,50 +96,146 @@ try:
             f.seek(0)
             f.truncate()
             f.write(contents)
-        else:
-            print("'nullok' not found, no change needed.")
-        f.close()
-except FileNotFoundError:
-    print("Could not find /etc/pam.d/common-auth")
 except Exception as e:
-    print(f"Error modifying /etc/pam.d/common-auth: {e}")
+    print(f"Error removing nullok: {e}")
 
-
-print("\n[+] Creating and enabling faillock PAM configs (CIS 5.3.2.2)...")
+# --- Common Task: Set Minlen = 10 ---
 try:
-    os.makedirs('/usr/share/pam-configs', exist_ok=True)
+    with open("/etc/pam.d/common-password", 'r+') as f:
+        contents = f.read()
+        if re.search(r"pam_pwquality\.so", contents):
+            if not re.search(r"minlen=", contents):
+                contents = re.sub(r"(pam_pwquality\.so.*)", r"\1 minlen=10", contents)
+                print("Added minlen=10 to pam_pwquality.so")
+                f.seek(0)
+                f.truncate()
+                f.write(contents)
+except Exception as e:
+    print(f"Error setting minlen: {e}")
+
+
+if "Mint" in OS_NAME:
+    print("\n[!] Detected Linux Mint. Applying Mint-specific PAM fixes...")
     
-    with open('/usr/share/pam-configs/faillock', 'w+') as f:
-        contents = """Name: Enforce failed login attempt counter
+    # Mint Key Item #12: Previous passwords are remembered (3)
+    # Mint Key Item #13: Account lockout policy
+    
+    try:
+        # Set remember=3 (Mint specific)
+        with open("/etc/pam.d/common-password", 'r+') as f:
+            contents = f.read()
+            if re.search(r"pam_unix\.so", contents):
+                if not re.search(r"remember=", contents):
+                    contents = re.sub(r"(pam_unix\.so.*)", r"\1 remember=3", contents)
+                    print("Added remember=3 to pam_unix.so (Mint Policy)")
+                    f.seek(0)
+                    f.truncate()
+                    f.write(contents)
+    except Exception as e:
+        print(f"Error setting remember=3: {e}")
+
+    # Create Mint-specific faillock configs (Item #13)
+    try:
+        os.makedirs('/usr/share/pam-configs', exist_ok=True)
+        
+        # File 1: faillock (Lockout on failed logins)
+        with open('/usr/share/pam-configs/faillock', 'w') as f:
+            f.write("""Name: Lockout on failed logins
+Default: no
+Priority: 0
+Auth-Type: Primary
+Auth:
+    [default=die] pam_faillock.so authfail
+    sufficient pam_faillock.so authsucc
+""")
+        
+        # File 2: faillock_notify (Notify on account lockout)
+        with open('/usr/share/pam-configs/faillock_notify', 'w') as f:
+            f.write("""Name: Notify on account lockout
+Default: no
+Priority: 1024
+Auth-Type: Primary
+Auth:
+    requisite pam_faillock.so preauth
+""")
+        
+        # File 3: faillock_reset (Reset lockout on success)
+        with open('/usr/share/pam-configs/faillock_reset', 'w') as f:
+            f.write("""Name: Reset lockout on success
+Default: no
+Priority: 0
+Auth-Type: Additional
+Auth:
+    required pam_faillock.so authsucc
+""")
+
+        print("Mint PAM configs created.")
+        print("Applying PAM updates...")
+        # Enable the profiles specifically mentioned in Mint Answer Key
+        subprocess.run(["pam-auth-update", "--enable", "faillock", "faillock_notify", "faillock_reset"], check=True)
+        print("Mint PAM settings applied successfully.")
+
+    except Exception as e:
+        print(f"Error applying Mint PAM settings: {e}")
+
+
+else: # UBUNTU (and others)
+    print("\n[!] Detected Ubuntu. Applying Ubuntu-specific PAM fixes...")
+    
+    # Ubuntu Key Item #9: Account lockout policy
+    
+    try:
+        # Set remember=5 (Ubuntu policy usually 5) and use pam_pwhistory
+        with open("/etc/pam.d/common-password", 'r+') as f:
+            contents = f.read()
+            
+            # Remove remember from pam_unix if present (to use pwhistory instead)
+            if re.search(r"pam_unix\.so.*remember=", contents):
+                contents = re.sub(r"\s+remember=\d+", "", contents)
+                
+            # Add pam_pwhistory if missing
+            if not re.search(r"pam_pwhistory\.so", contents):
+                print("Adding pam_pwhistory.so with remember=5")
+                contents = re.sub(
+                    r"(password\s+\[success=1 default=ignore\]\s+pam_unix\.so.*)",
+                    "password requisite pam_pwhistory.so remember=5\n" + r"\1",
+                    contents
+                )
+                f.seek(0)
+                f.truncate()
+                f.write(contents)
+    except Exception as e:
+        print(f"Error setting password history: {e}")
+
+    # Create Ubuntu-style faillock configs
+    try:
+        os.makedirs('/usr/share/pam-configs', exist_ok=True)
+        
+        with open('/usr/share/pam-configs/faillock', 'w') as f:
+            f.write("""Name: Enforce failed login attempt counter
 Default: no
 Priority: 0
 Auth-Type: Primary
 Auth:
     [default=die] pam_faillock.so authfail deny=5 unlock_time=900
     sufficient pam_faillock.so authsucc
-"""
-        f.write(contents)
-        f.close()
+""")
 
-    with open('/usr/share/pam-configs/faillock_notify', 'w+') as f:
-        contents = """Name: Notify on failed login attempts
+        with open('/usr/share/pam-configs/faillock_notify', 'w') as f:
+            f.write("""Name: Notify on failed login attempts
 Default: no
 Priority: 1024
 Auth-Type: Primary
 Auth:
     requisite pam_faillock.so preauth
-Account-Type: Primary
-Account:
-    required pam_faillock.so
-"""
-        f.write(contents)
-        f.close()
-    
-    print("Faillock config files created with deny=5 and unlock_time=900.")
-    print("Running 'pam-auth-update --enable faillock faillock_notify' to apply...")
-    subprocess.run(["pam-auth-update", "--enable", "faillock", "faillock_notify"], check=True)
-    
-except Exception as e:
-    print(f"Error creating PAM configs or running pam-auth-update: {e}")
+""")
+        
+        print("Ubuntu PAM configs created.")
+        print("Applying PAM updates...")
+        subprocess.run(["pam-auth-update", "--enable", "faillock", "faillock_notify"], check=True)
+        print("Ubuntu PAM settings applied successfully.")
 
-print("\n--- Python auth script finished. ---")
+    except Exception as e:
+        print(f"Error applying Ubuntu PAM settings: {e}")
+
+print("\n--- Script Finished ---")

@@ -429,7 +429,7 @@ harden_login_screen() {
     if [[ -f /etc/lightdm/lightdm.conf ]]; then
         backup_file /etc/lightdm/lightdm.conf
         sed -i -E "s/^\s*allow-guest\s*=.*/allow-guest=false/" /etc/lightdm/lightdm.conf
-        sed -i -E "s/^\s*greeter-hide-users\s*=.*/greeter-hide-users=true/" /etc/lightdm.conf
+        sed -i -E "s/^\s*greeter-hide-users\s*=.*/greeter-hide-users=true/" /etc/lightdm/lightdm.conf
         
         if ! grep -q "allow-guest=false" /etc/lightdm/lightdm.conf; then
             echo "allow-guest=false" >> /etc/lightdm/lightdm.conf

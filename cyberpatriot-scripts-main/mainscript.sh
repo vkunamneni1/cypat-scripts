@@ -196,7 +196,7 @@ services_hardening() {
   # Purge common unwanted services
   apt-get purge -y postfix dovecot-core rpcbind samba postgresql bind9 \
                     autofs isc-dhcp-server dnsmasq slapd nfs-kernel-server \
-                    nis rsync snmpd tftpd-hpa xinetd xserver-common \
+                    nis rsync snmpd tftpd-hpa xinetd \
                     2>/dev/null || true
    
   # Disable other common unwanted services

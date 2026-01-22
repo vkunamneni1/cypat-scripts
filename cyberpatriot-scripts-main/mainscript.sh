@@ -132,6 +132,19 @@ sysctl_hardening() {
    
   # NEW: Restrict ptrace (CIS 1.5.2)
   set_sysctl "kernel.yama.ptrace_scope" "1"
+  
+  # CIS 3.2.1 - Disable source routing
+  set_sysctl "net.ipv4.conf.all.accept_source_route" "0"
+  set_sysctl "net.ipv4.conf.default.accept_source_route" "0"
+  
+  # CIS 3.2.4 - Ignore ICMP broadcast requests
+  set_sysctl "net.ipv4.icmp_echo_ignore_broadcasts" "1"
+  
+  # CIS 3.2.5 - Ignore bogus ICMP error responses
+  set_sysctl "net.ipv4.icmp_ignore_bogus_error_responses" "1"
+  
+  # CIS 1.5.2 - Disable core dumps for SUID programs
+  set_sysctl "fs.suid_dumpable" "0"
 
   sysctl -p "$conf_file" >/dev/null 2>&1 || true
 }
@@ -170,6 +183,29 @@ ssh_hardening() {
   grep -q '^\s*MaxStartups' "$f" && sed -ri 's/^\s*MaxStartups.*/MaxStartups 10:30:60/' "$f" || echo 'MaxStartups 10:30:60' >> "$f"
   # Set banner (CIS 1.6.3 / 5.1.5)
   grep -q '^\s*Banner' "$f" && sed -ri 's|^\s*Banner.*|Banner /etc/issue.net|' "$f" || echo 'Banner /etc/issue.net' >> "$f"
+  
+  # CIS 5.1.8 - Disable X11 Forwarding
+  grep -q '^\s*X11Forwarding' "$f" && sed -ri 's/^\s*X11Forwarding.*/X11Forwarding no/' "$f" || echo 'X11Forwarding no' >> "$f"
+  # CIS 5.1.9 - Ignore .rhosts files
+  grep -q '^\s*IgnoreRhosts' "$f" && sed -ri 's/^\s*IgnoreRhosts.*/IgnoreRhosts yes/' "$f" || echo 'IgnoreRhosts yes' >> "$f"
+  # CIS 5.1.10 - Disable host-based authentication
+  grep -q '^\s*HostbasedAuthentication' "$f" && sed -ri 's/^\s*HostbasedAuthentication.*/HostbasedAuthentication no/' "$f" || echo 'HostbasedAuthentication no' >> "$f"
+  # CIS 5.1.12 - Set LoginGraceTime
+  grep -q '^\s*LoginGraceTime' "$f" && sed -ri 's/^\s*LoginGraceTime.*/LoginGraceTime 60/' "$f" || echo 'LoginGraceTime 60' >> "$f"
+  # CIS 5.1.13 - Limit max sessions
+  grep -q '^\s*MaxSessions' "$f" && sed -ri 's/^\s*MaxSessions.*/MaxSessions 4/' "$f" || echo 'MaxSessions 4' >> "$f"
+  # CIS 5.1.6 - Ensure PAM is used
+  grep -q '^\s*UsePAM' "$f" && sed -ri 's/^\s*UsePAM.*/UsePAM yes/' "$f" || echo 'UsePAM yes' >> "$f"
+  # Disable TCP forwarding
+  grep -q '^\s*AllowTcpForwarding' "$f" && sed -ri 's/^\s*AllowTcpForwarding.*/AllowTcpForwarding no/' "$f" || echo 'AllowTcpForwarding no' >> "$f"
+  
+  # CIS 5.1.14-16 - Strong cryptographic ciphers and MACs
+  grep -q '^\s*Ciphers' "$f" && sed -ri 's/^\s*Ciphers.*/Ciphers aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr/' "$f" || echo 'Ciphers aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr' >> "$f"
+  grep -q '^\s*MACs' "$f" && sed -ri 's/^\s*MACs.*/MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256/' "$f" || echo 'MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256' >> "$f"
+  
+  # CIS 5.1.1 - Fix sshd_config permissions
+  chmod 600 /etc/ssh/sshd_config
+  chown root:root /etc/ssh/sshd_config
    
   systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
 }
@@ -326,6 +362,10 @@ kernel_module_hardening() {
     echo "install sctp /bin/true" > /etc/modprobe.d/sctp.conf
     echo "install rds /bin/true" > /etc/modprobe.d/rds.conf
     echo "install tipc /bin/true" > /etc/modprobe.d/tipc.conf
+    # CIS 1.1.1.2 - Disable squashfs
+    echo "install squashfs /bin/true" > /etc/modprobe.d/squashfs.conf
+    # CIS 1.1.1.3 - Disable udf
+    echo "install udf /bin/true" > /etc/modprobe.d/udf.conf
 }
 
 # 14) Systemd Hardening - SAFE VERSION
@@ -369,6 +409,17 @@ harden_cron() {
     echo "root" > /etc/at.allow
     chmod 640 /etc/cron.allow /etc/at.allow
     chown root:root /etc/cron.allow /etc/at.allow
+    
+    # CIS 5.2.1-6 - Set cron file and directory permissions
+    log "Cron: Setting cron file permissions."
+    chmod 600 /etc/crontab 2>/dev/null || true
+    chown root:root /etc/crontab 2>/dev/null || true
+    chmod 700 /etc/cron.hourly 2>/dev/null || true
+    chmod 700 /etc/cron.daily 2>/dev/null || true
+    chmod 700 /etc/cron.weekly 2>/dev/null || true
+    chmod 700 /etc/cron.monthly 2>/dev/null || true
+    chmod 700 /etc/cron.d 2>/dev/null || true
+    chown root:root /etc/cron.hourly /etc/cron.daily /etc/cron.weekly /etc/cron.monthly /etc/cron.d 2>/dev/null || true
 }
 
 # 16) Disable Ctrl-Alt-Del
@@ -527,6 +578,70 @@ EOF
     chown root:root /etc/profile.d/99-timeout.sh
 }
 
+# 27) NEW: Configure Login Banners (CIS 1.7.x)
+harden_banners() {
+    log "Banners: Setting login warning banners."
+    local banner_text="Authorized users only. All activity may be monitored and reported."
+    
+    echo "$banner_text" > /etc/issue
+    echo "$banner_text" > /etc/issue.net
+    echo "$banner_text" > /etc/motd
+    
+    # CIS 1.7.4-6 - Set banner file permissions
+    chmod 644 /etc/issue /etc/issue.net /etc/motd
+    chown root:root /etc/issue /etc/issue.net /etc/motd
+}
+
+# 28) NEW: Harden GRUB Bootloader Permissions (CIS 1.4.x)
+harden_grub() {
+    log "GRUB: Setting bootloader permissions."
+    if [[ -f /boot/grub/grub.cfg ]]; then
+        chown root:root /boot/grub/grub.cfg
+        chmod 400 /boot/grub/grub.cfg
+    fi
+    # Note: GRUB password skipped for CyberPatriot compatibility
+}
+
+# 29) pwquality.conf handled by py_authscript.py
+
+# 30) NEW: Configure Time Synchronization (CIS 2.3.x)
+configure_time_sync() {
+    log "Time Sync: Configuring systemd-timesyncd."
+    systemctl enable --now systemd-timesyncd 2>/dev/null || true
+    timedatectl set-ntp true 2>/dev/null || true
+}
+
+# 31) NEW: Configure rsyslog (CIS 6.1.x)
+configure_rsyslog() {
+    log "Rsyslog: Configuring system logging."
+    apt-get install -y rsyslog 2>/dev/null || true
+    systemctl enable --now rsyslog 2>/dev/null || true
+    
+    # CIS 6.1.4 - Set log file permissions
+    if [[ -f /etc/rsyslog.conf ]]; then
+        backup_file /etc/rsyslog.conf
+        if ! grep -q '^\$FileCreateMode' /etc/rsyslog.conf; then
+            echo '$FileCreateMode 0640' >> /etc/rsyslog.conf
+        fi
+        systemctl restart rsyslog 2>/dev/null || true
+    fi
+}
+
+# 32) NEW: Harden Core Dumps (CIS 1.5.x)
+harden_core_dumps() {
+    log "Core Dumps: Disabling core dumps via limits.conf."
+    backup_file /etc/security/limits.conf
+    if ! grep -q '^\*.*hard.*core.*0' /etc/security/limits.conf; then
+        echo "* hard core 0" >> /etc/security/limits.conf
+    fi
+}
+
+# 33) NEW: Fix Sticky Bit on World-Writable Directories (CIS 1.1.18)
+fix_sticky_bit() {
+    log "Permissions: Setting sticky bit on world-writable directories."
+    find / -type d -perm -0002 ! -perm -1000 -exec chmod a+t {} \; 2>/dev/null || true
+}
+
 # 25) NEW: Configure AIDE (CIS 6.3)
 harden_aide() {
     log "Configuring AIDE file integrity monitor..."
@@ -628,7 +743,12 @@ main() {
   harden_login_screen
    
   # New hardening steps from CIS/checklist
-  # harden_banners
+  harden_banners
+  harden_grub
+  configure_time_sync
+  configure_rsyslog
+  harden_core_dumps
+  fix_sticky_bit
   harden_securetty
   harden_host_access
   harden_umask
